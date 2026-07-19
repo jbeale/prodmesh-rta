@@ -56,7 +56,20 @@ python -m venv .venv
 
 ## Building the C++ version
 
-Needs CMake 3.16+, a C++17 compiler, and Qt 6 (Widgets + Multimedia).
+### The easy way
+
+- **Windows**: install Qt from [qt.io](https://www.qt.io/download-qt-installer)
+  (Qt 6.x Desktop with the **MinGW** kit, **Qt Multimedia** under Additional
+  Libraries, and CMake/Ninja/MinGW under Build Tools), then double-click
+  **`build.bat`**. It finds Qt automatically and leaves a self-contained
+  `build\` folder — `ProdMeshRemoteRTA.exe` runs on any Windows PC.
+- **macOS**: `chmod +x build.sh && ./build.sh` — installs qt/cmake/ninja via
+  Homebrew if needed and produces `build/ProdMeshRemoteRTA.app` with the Qt
+  frameworks bundled.
+
+### By hand
+
+Needs CMake 3.16+, a C++17 compiler, and Qt 6 (Widgets + Multimedia + Network).
 
 ### Windows (MSYS2/MinGW)
 
