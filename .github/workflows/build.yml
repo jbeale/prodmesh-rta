@@ -15,7 +15,9 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.11.*'
+          # 6.11 is not yet installable via aqt on Windows; 6.8 builds fine
+          # here (the AGL link problem that forces 6.11 is macOS-only)
+          version: '6.8.*'
           modules: 'qtmultimedia'
           cache: true
 
