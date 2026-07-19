@@ -11,7 +11,13 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
+#include <QTextStream>
+
+#include <functional>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMainWindow>
@@ -20,6 +26,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -41,6 +48,146 @@
 #endif
 
 static const char *APP_NAME = "ProdMesh Remote RTA";
+
+// Parse a measurement-mic calibration file: text lines of "<freq Hz> <dB>"
+// (whitespace separated; REW / miniDSP style). Lines that don't start with
+// two numbers (comments, "Sens Factor" headers, quotes) are skipped.
+static bool parseMicCorrection(const QString &path,
+                               std::vector<std::pair<double, double>> &points,
+                               QString &error) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        error = "cannot open file";
+        return false;
+    }
+    QTextStream in(&f);
+    points.clear();
+    while (!in.atEnd()) {
+        const QString line = in.readLine().trimmed();
+        if (line.isEmpty())
+            continue;
+        const QStringList tok =
+            line.split(QRegularExpression("[\\s,;]+"), Qt::SkipEmptyParts);
+        if (tok.size() < 2)
+            continue;
+        bool okF = false, okD = false;
+        const double freq = tok[0].toDouble(&okF);
+        const double db = tok[1].toDouble(&okD);
+        if (!okF || !okD || freq <= 0.0)
+            continue;
+        points.emplace_back(freq, db);
+    }
+    if (points.size() < 2) {
+        error = "no usable \"<frequency> <dB>\" data lines found";
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+
+class CalibrationDialog : public QDialog {
+public:
+    CalibrationDialog(QWidget *parent, std::function<double()> slowDbfs,
+                      double currentCal)
+        : QDialog(parent), m_slowDbfs(std::move(slowDbfs)),
+          m_currentCal(currentCal) {
+        setWindowTitle("Calibrate SPL");
+        auto *form = new QFormLayout(this);
+
+        refSpin = new QDoubleSpinBox;
+        refSpin->setRange(30.0, 140.0);
+        refSpin->setDecimals(1);
+        refSpin->setValue(94.0);
+        refSpin->setSuffix(" dB SPL");
+        form->addRow("Reference level:", refSpin);
+
+        m_liveLbl = new QLabel("--.-");
+        form->addRow("Currently reading:", m_liveLbl);
+
+        m_captureBtn = new QPushButton("Capture");
+        form->addRow(m_captureBtn);
+
+        m_resultLbl = new QLabel(
+            "Put the mic on a calibrator (or play steady pink noise measured\n"
+            "by a trusted meter), enter that level above, then press Capture.\n"
+            "The level is averaged for ~1.5 s.");
+        m_resultLbl->setStyleSheet("color:#8a92a6; font-size:11px;");
+        form->addRow(m_resultLbl);
+
+        m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
+                                         QDialogButtonBox::Cancel);
+        m_buttons->button(QDialogButtonBox::Ok)->setText("Apply");
+        m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+        connect(m_buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        form->addRow(m_buttons);
+
+        connect(m_captureBtn, &QPushButton::clicked, this, [this] {
+            m_capturing = true;
+            m_accumPower = 0.0;
+            m_accumCount = 0;
+            m_capturePolls = 0;
+            m_captureBtn->setEnabled(false);
+            m_resultLbl->setText("Capturing…");
+        });
+
+        auto *poll = new QTimer(this);
+        poll->setInterval(100);
+        connect(poll, &QTimer::timeout, this, [this] { onPoll(); });
+        poll->start();
+    }
+
+    double newCal() const { return m_newCal; }
+
+    QDoubleSpinBox *refSpin;
+
+private:
+    void onPoll() {
+        const double dbfs = m_slowDbfs();
+        m_liveLbl->setText(
+            std::isfinite(dbfs)
+                ? QString("%1 dB SPL (with current cal)")
+                      .arg(dbfs + m_currentCal, 0, 'f', 1)
+                : QString("no signal"));
+        if (!m_capturing)
+            return;
+        ++m_capturePolls;
+        if (std::isfinite(dbfs)) {
+            m_accumPower += std::pow(10.0, dbfs / 10.0);
+            ++m_accumCount;
+        }
+        if (m_accumCount >= 15) {
+            m_capturing = false;
+            m_captureBtn->setEnabled(true);
+            const double avgDbfs = 10.0 * std::log10(m_accumPower / m_accumCount);
+            m_newCal = refSpin->value() - avgDbfs;
+            m_resultLbl->setText(
+                QString("Measured %1 dBFS -> new cal %2 dB (was %3 dB).\n"
+                        "Press Apply to use it.")
+                    .arg(avgDbfs, 0, 'f', 1)
+                    .arg(m_newCal, 0, 'f', 1)
+                    .arg(m_currentCal, 0, 'f', 1));
+            m_buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
+        } else if (m_capturePolls > 50) {  // ~5 s without enough signal
+            m_capturing = false;
+            m_captureBtn->setEnabled(true);
+            m_resultLbl->setText("No signal — check the selected input.");
+        }
+    }
+
+    std::function<double()> m_slowDbfs;
+    double m_currentCal;
+    double m_newCal = kNaN;
+    bool m_capturing = false;
+    double m_accumPower = 0.0;
+    int m_accumCount = 0;
+    int m_capturePolls = 0;
+    QLabel *m_liveLbl;
+    QLabel *m_resultLbl;
+    QPushButton *m_captureBtn;
+    QDialogButtonBox *m_buttons;
+};
 
 // ---------------------------------------------------------------------------
 
@@ -249,6 +396,29 @@ private:
         connect(quitAct, &QAction::triggered, this, &QWidget::close);
 
         QMenu *settingsMenu = menuBar()->addMenu("&Settings");
+        QAction *calAct = settingsMenu->addAction("&Calibrate SPL…");
+        connect(calAct, &QAction::triggered, this, [this] { showCalibration(); });
+        QAction *micAct = settingsMenu->addAction("Load &Mic Correction…");
+        connect(micAct, &QAction::triggered, this, [this] {
+            const QString path = QFileDialog::getOpenFileName(
+                this, "Load Mic Correction File", QString(),
+                "Calibration files (*.txt *.cal *.frd *.mic);;All files (*)");
+            if (!path.isEmpty())
+                loadMicCorrection(path, true);
+        });
+        m_clearMicAct = settingsMenu->addAction("Clear Mic Correction");
+        m_clearMicAct->setEnabled(false);
+        connect(m_clearMicAct, &QAction::triggered, this, [this] {
+            m_analyzer.setMicCorrection({});
+            m_analyzer.resetAll();
+            m_micCorrPath.clear();
+            m_micCorrName.clear();
+            m_clearMicAct->setText("Clear Mic Correction");
+            m_clearMicAct->setEnabled(false);
+            statusBar()->showMessage("Mic correction cleared", 5000);
+            saveSettings();
+        });
+        settingsMenu->addSeparator();
         QAction *apiAct = settingsMenu->addAction("&API && Streaming…");
         connect(apiAct, &QAction::triggered, this, [this] { showApiSettings(); });
 
@@ -258,6 +428,46 @@ private:
         connect(aboutAct, &QAction::triggered, this, [this] { showAbout(); });
         QAction *aboutQtAct = helpMenu->addAction("About &Qt");
         connect(aboutQtAct, &QAction::triggered, qApp, &QApplication::aboutQt);
+    }
+
+    void showCalibration() {
+        CalibrationDialog dlg(
+            this, [this] { return m_lastSlowDbfs; }, m_calSpin->value());
+        if (dlg.exec() == QDialog::Accepted && std::isfinite(dlg.newCal())) {
+            m_calSpin->setValue(dlg.newCal());  // valueChanged saves settings
+            statusBar()->showMessage(
+                QString("Calibrated: cal offset set to %1 dB")
+                    .arg(dlg.newCal(), 0, 'f', 1),
+                5000);
+        }
+    }
+
+    void loadMicCorrection(const QString &path, bool interactive) {
+        std::vector<std::pair<double, double>> pts;
+        QString err;
+        if (!parseMicCorrection(path, pts, err)) {
+            const QString msg =
+                QString("Could not load mic correction \"%1\": %2")
+                    .arg(QFileInfo(path).fileName(), err);
+            if (interactive)
+                QMessageBox::warning(this, "Mic Correction", msg);
+            else
+                statusBar()->showMessage(msg, 8000);
+            return;
+        }
+        m_analyzer.setMicCorrection(pts);
+        m_analyzer.resetAll();
+        m_micCorrPath = path;
+        m_micCorrName = QFileInfo(path).fileName();
+        m_clearMicAct->setText(
+            QString("Clear Mic Correction (%1)").arg(m_micCorrName));
+        m_clearMicAct->setEnabled(true);
+        statusBar()->showMessage(QString("Mic correction: %1 (%2 points)")
+                                     .arg(m_micCorrName)
+                                     .arg(pts.size()),
+                                 5000);
+        if (interactive)  // during loadSettings() a save would clobber
+            saveSettings();  // settings that are not restored yet
     }
 
     void showApiSettings() {
@@ -306,6 +516,9 @@ private:
         m_apiPort = st.value("apiPort", 8517).toInt();
         m_streamRateIdx = st.value("streamRate", 2).toInt();  // default 10 Hz
         m_savedDevice = st.value("device").toString();
+        const QString micPath = st.value("micCorrFile").toString();
+        if (!micPath.isEmpty())
+            loadMicCorrection(micPath, false);
         const QByteArray geo = st.value("geometry").toByteArray();
         if (!geo.isEmpty())
             restoreGeometry(geo);
@@ -320,6 +533,7 @@ private:
         st.setValue("apiEnabled", m_apiEnabled);
         st.setValue("apiPort", m_apiPort);
         st.setValue("streamRate", m_streamRateIdx);
+        st.setValue("micCorrFile", m_micCorrPath);
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
         st.setValue("geometry", saveGeometry());
@@ -424,6 +638,7 @@ private:
         m_lastTickMs = nowTick;
         AnalyzerResult res = m_analyzer.process(m_samples, dt, rtaTau(),
                                                 m_peakCheck->isChecked());
+        m_lastSlowDbfs = res.slow;
         const double cal = m_calSpin->value();
         const QString w = m_weightCombo->currentText();
         m_rFast->set(QString("L%1F (Fast)").arg(w), res.fast + cal);
@@ -451,6 +666,7 @@ private:
         snap.leq = res.leq + cal;
         snap.bands = res.bands;
         snap.peaks = res.peaks;
+        snap.micCorr = m_micCorrName;
         m_api->setSnapshot(snap);
         if (now - m_lastHistPush >= 1000) {
             m_lastHistPush = now;
@@ -470,6 +686,10 @@ private:
     std::vector<float> m_samples;
     QList<QAudioDevice> m_devices;
     QString m_savedDevice;
+    QString m_micCorrPath;
+    QString m_micCorrName;
+    QAction *m_clearMicAct = nullptr;
+    double m_lastSlowDbfs = kNaN;
     ApiServer *m_api;
     bool m_apiEnabled = false;
     int m_apiPort = 8517;
@@ -524,9 +744,19 @@ static int selftest() {
             others += std::pow(10.0, res.bands[i] / 10.0);
     std::printf("energy outside 1 kHz band = %.1f dBFS (expected far below -3)\n",
                 toDb(others));
-    const bool ok = std::fabs(res.fast + 3.01) < 0.2 &&
-                    THIRD_OCT_CENTERS[kMax] == 1000.0 &&
-                    std::fabs(res.bands[kMax] + 3.01) < 0.3;
+    bool ok = std::fabs(res.fast + 3.01) < 0.2 &&
+              THIRD_OCT_CENTERS[kMax] == 1000.0 &&
+              std::fabs(res.bands[kMax] + 3.01) < 0.3;
+
+    // Mic correction: a flat +6 dB response file must LOWER readings by 6 dB.
+    an.setMicCorrection({{20.0, 6.0}, {20000.0, 6.0}});
+    an.resetAll();
+    for (int i = 0; i < 100; ++i)
+        res = an.process(x, 0.05, 0.125, false);
+    std::printf("with flat +6 dB mic file: fast = %.2f dBFS (expected ~ -9.01)\n",
+                res.fast);
+    ok = ok && std::fabs(res.fast + 9.01) < 0.25;
+
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

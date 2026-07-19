@@ -44,6 +44,7 @@ public:
         double fast = kNaN, slow = kNaN, leq = kNaN;  // dB SPL (cal applied)
         std::vector<double> bands;                    // dB SPL
         std::vector<double> peaks;                    // empty if peak hold off
+        QString micCorr;                              // cal file name, or empty
     };
     struct HistSample {
         qint64 t = 0;
@@ -307,6 +308,9 @@ private:
                 {"time_ms", now},
                 {"history_len", int(m_hist.size())},
                 {"stream_clients", int(m_streams.size())},
+                {"mic_correction", m_snap.micCorr.isEmpty()
+                                       ? QJsonValue()
+                                       : QJsonValue(m_snap.micCorr)},
             });
         }
         if (path == "/api/spl") {

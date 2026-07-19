@@ -112,6 +112,16 @@ public:
 
     void resetPeaks() { m_bandPeakDb.clear(); }
 
+    // Mic correction: sorted (freq Hz, response dB) points describing the
+    // microphone's deviation from flat. The response is SUBTRACTED from the
+    // spectrum (standard measurement-mic cal file convention). Empty = off.
+    void setMicCorrection(std::vector<std::pair<double, double>> points) {
+        std::sort(points.begin(), points.end());
+        m_micCorr = std::move(points);
+        m_cachedSr = -1;  // force prepare() to rebuild the weighting table
+    }
+    bool hasMicCorrection() const { return !m_micCorr.empty(); }
+
     // Weighted per-bin power of the last processed block (for spectrograms).
     const std::vector<double> &lastPower() const { return m_power; }
     double binWidth() const { return double(sr) / FFT_SIZE; }
@@ -220,6 +230,8 @@ private:
                 wdb = aWeightDb(f);
             else if (weighting == 'C')
                 wdb = cWeightDb(f);
+            if (!m_micCorr.empty())
+                wdb -= micCorrDb(f);
             m_wlin[k] = std::pow(10.0, wdb / 10.0);
         }
         m_splLo = int(std::ceil(20.0 / df));
@@ -252,6 +264,23 @@ private:
         m_bandPeakDb.clear();
     }
 
+    // Log-frequency linear interpolation of the mic response, clamped to the
+    // first/last point outside the file's range.
+    double micCorrDb(double f) const {
+        const auto &v = m_micCorr;
+        if (f <= v.front().first)
+            return v.front().second;
+        if (f >= v.back().first)
+            return v.back().second;
+        auto hi = std::upper_bound(
+            v.begin(), v.end(), std::make_pair(f, -1e300));
+        auto lo = hi - 1;
+        const double u = (std::log(f) - std::log(lo->first)) /
+                         (std::log(hi->first) - std::log(lo->first));
+        return lo->second + u * (hi->second - lo->second);
+    }
+
+    std::vector<std::pair<double, double>> m_micCorr;
     std::vector<double> m_window;
     double m_winNorm = 1.0;
     std::vector<std::complex<double>> m_fftBuf;

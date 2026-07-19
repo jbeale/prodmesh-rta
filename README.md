@@ -113,12 +113,29 @@ output only appears when redirected:
 
 ### Calibration
 
-Computer mics are not calibrated, so absolute dB SPL is only as good as the
-**Cal** offset (displayed level = dBFS + Cal). To calibrate: put a known level
-at the mic — a 94 dB calibrator, or side-by-side with a meter/app you trust —
-and adjust **Cal** until the readout matches. That offset stays valid for that
-mic at that input-gain setting. Uncalibrated, the numbers are still perfectly
-usable as *relative* measurements.
+Mics are not calibrated out of the box, so absolute dB SPL is only as good as
+the **Cal** offset (displayed level = dBFS + Cal). In the C++ app use
+**Settings → Calibrate SPL…**: put the mic on a calibrator (or play steady
+pink noise measured by a meter/app you trust), enter that reference level,
+press **Capture** — the app averages ~1.5 s and computes the offset for you.
+The offset stays valid for that mic *at that preamp/input-gain setting*;
+change the gain and you must recalibrate. Uncalibrated, the numbers are still
+perfectly usable as relative measurements.
+
+If you have a Smaart rig calibrated on the same mic/interface/gain, its
+dBFS→SPL offset is conceptually the same number — but verify side-by-side
+once, since different driver paths can shift full-scale by a fixed dB.
+
+### Mic correction files (C++ version)
+
+**Settings → Load Mic Correction…** accepts standard measurement-mic
+calibration text files (REW / miniDSP UMIK style): lines of
+`<frequency Hz> <response dB>`, whitespace- or comma-separated; comment and
+header lines are skipped. The response curve is interpolated log-frequency
+and **subtracted** from the spectrum (the usual convention — the file
+describes the mic's deviation from flat). Applies to the SPL readouts, RTA,
+spectrogram, and everything served over the API; the loaded file persists
+across restarts and is reported in `/api/status` as `mic_correction`.
 
 ## HTTP + WebSocket API (C++ version)
 
