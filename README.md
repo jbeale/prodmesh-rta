@@ -1,5 +1,7 @@
 # ProdMesh Remote RTA
 
+[![build](https://github.com/jbeale/prodmesh-rta/actions/workflows/build.yml/badge.svg)](https://github.com/jbeale/prodmesh-rta/actions/workflows/build.yml)
+
 A minimal, free, cross-platform (Windows / macOS) SPL meter and spectrum
 analyzer, part of the ProdMesh production toolkit: point it at any microphone
 input and get

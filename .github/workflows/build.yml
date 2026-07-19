@@ -1,0 +1,81 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Selftest
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem -Recurse build -Filter ProdMeshRemoteRTA.exe | Select-Object -First 1).FullName
+          # GUI-subsystem exe: output is only visible when redirected
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest" -RedirectStandardOutput selftest.txt -Wait -PassThru -NoNewWindow
+          Get-Content selftest.txt
+          exit $p.ExitCode
+
+      - name: Package (windeployqt)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          $exe = (Get-ChildItem -Recurse build -Filter ProdMeshRemoteRTA.exe | Select-Object -First 1).FullName
+          Copy-Item $exe dist/
+          windeployqt --release dist/ProdMeshRemoteRTA.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ProdMeshRemoteRTA-windows-x64
+          path: dist
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Selftest
+        run: ./build/ProdMeshRemoteRTA.app/Contents/MacOS/ProdMeshRemoteRTA --selftest
+
+      - name: Package (macdeployqt)
+        run: |
+          macdeployqt build/ProdMeshRemoteRTA.app
+          # ditto preserves the symlinks/permissions inside the bundle;
+          # upload-artifact alone would flatten them
+          ditto -c -k --keepParent build/ProdMeshRemoteRTA.app ProdMeshRemoteRTA-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ProdMeshRemoteRTA-macos
+          path: ProdMeshRemoteRTA-macos.zip

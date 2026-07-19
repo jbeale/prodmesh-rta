@@ -186,8 +186,9 @@ private:
         QByteArray key;
         for (const QByteArray &line : header.split('\r')) {
             const QByteArray l = line.startsWith('\n') ? line.mid(1) : line;
-            if (l.toLower().startsWith("sec-websocket-key:"))
-                key = l.mid(int(strlen("sec-websocket-key:"))).trimmed();
+            static const QByteArray kKeyHeader = "sec-websocket-key:";
+            if (l.toLower().startsWith(kKeyHeader))
+                key = l.mid(kKeyHeader.size()).trimmed();
         }
         if (key.isEmpty()) {
             respond(sock, 400,
