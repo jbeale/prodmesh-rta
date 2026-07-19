@@ -9,9 +9,13 @@ point it at any microphone input and get
   selectable averaging and peak hold
 - Input device picker, clip indicator, calibration offset
 
-Built with Qt (PySide6) + PortAudio (sounddevice) + NumPy. One file: `rta.py`.
+Two equivalent implementations live in this repo:
 
-## Running it
+- **Python** — `rta.py` (PySide6 + sounddevice + NumPy). Zero build step.
+- **C++** — `src/main.cpp` (pure Qt 6 Widgets + Multimedia, no other
+  dependencies; FFT included). Compiles to a native binary with CMake.
+
+## Running the Python version
 
 ### Windows
 
@@ -40,6 +44,41 @@ python -m venv .venv
 .venv/bin/python rta.py                        # Windows: .venv\Scripts\python
 ```
 
+## Building the C++ version
+
+Needs CMake 3.16+, a C++17 compiler, and Qt 6 (Widgets + Multimedia).
+
+### Windows (MSYS2/MinGW)
+
+```bash
+pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
+          mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-multimedia
+cmake -B build -G Ninja
+cmake --build build
+./build/rta.exe
+```
+
+With MSVC + the official Qt installer instead:
+`cmake -B build -DCMAKE_PREFIX_PATH=C:\Qt\6.x.x\msvc2022_64 && cmake --build build --config Release`
+
+To make a self-contained folder you can copy to another PC, run
+`windeployqt build/rta.exe`.
+
+### macOS
+
+```bash
+brew install qt cmake ninja
+cmake -B build -G Ninja
+cmake --build build
+open build/rta.app
+```
+
+The app bundle includes the microphone-permission string, so macOS will
+prompt on first launch. `macdeployqt build/rta.app` makes it portable.
+
+`rta --selftest` runs the same DSP check as the Python version (on Windows
+the output only appears when redirected: `rta.exe --selftest > out.txt`).
+
 ## Using it
 
 - **Input** — pick your microphone. On Windows the same physical mic shows up
@@ -61,6 +100,18 @@ at the mic — a 94 dB calibrator, or side-by-side with a meter/app you trust �
 and adjust **Cal** until the readout matches. That offset stays valid for that
 mic at that input-gain setting. Uncalibrated, the numbers are still perfectly
 usable as *relative* measurements.
+
+## Troubleshooting
+
+- **Levels drop to nothing a few seconds after you stop talking** — that's a
+  noise gate / noise suppression applied by the OS or audio driver, not the
+  app. On Windows: Settings → System → Sound → your microphone → Advanced →
+  turn **Audio enhancements** off (on some Realtek systems it's in the
+  Realtek Audio Console instead). For measurement use you want every
+  "enhancement" (noise suppression, AGC, echo cancellation) disabled.
+- **Meter pinned near the floor (~0–5 dB)** — wrong input selected (e.g. an
+  unconnected line-in jack) or the mic's input gain is near zero in the OS
+  sound settings.
 
 ## Notes / limits
 
