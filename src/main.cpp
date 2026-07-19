@@ -1,17 +1,24 @@
-// RTA — a minimal cross-platform (Windows/macOS) SPL meter and 1/3-octave
-// real-time analyzer with spectrogram, SPL history, and a polling HTTP API.
+// ProdMesh Remote RTA — a minimal cross-platform (Windows/macOS) SPL meter
+// and 1/3-octave real-time analyzer with spectrogram, SPL history, and an
+// HTTP/WebSocket API for remote monitoring (e.g. by ProdMesh).
 //
-// See dsp.h (analysis), audio.h (capture), widgets.h (views), api.h (HTTP).
+// See dsp.h (analysis), audio.h (capture), widgets.h (views), api.h (API).
 
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMediaDevices>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
@@ -29,17 +36,71 @@
 #include "dsp.h"
 #include "widgets.h"
 
+#ifndef APP_VERSION
+#define APP_VERSION "dev"
+#endif
+
+static const char *APP_NAME = "ProdMesh Remote RTA";
+
+// ---------------------------------------------------------------------------
+
+class ApiSettingsDialog : public QDialog {
+public:
+    ApiSettingsDialog(QWidget *parent, bool enabled, int port, int rateIdx)
+        : QDialog(parent) {
+        setWindowTitle("API Settings");
+        auto *form = new QFormLayout(this);
+
+        enableCheck = new QCheckBox("Serve levels to other machines");
+        enableCheck->setChecked(enabled);
+        form->addRow("HTTP API:", enableCheck);
+
+        portSpin = new QSpinBox;
+        portSpin->setRange(1024, 65535);
+        portSpin->setValue(port);
+        form->addRow("Port:", portSpin);
+
+        rateCombo = new QComboBox;
+        rateCombo->addItems({"1 Hz", "5 Hz", "10 Hz", "20 Hz"});
+        rateCombo->setCurrentIndex(rateIdx);
+        rateCombo->setToolTip("How often /api/stream WebSocket clients "
+                              "receive a levels message.");
+        form->addRow("Stream rate:", rateCombo);
+
+        auto *hint = new QLabel(
+            "Endpoints: /api/status, /api/spl, /api/rta, /api/history\n"
+            "WebSocket stream: ws://<this machine>:<port>/api/stream\n"
+            "Allow the app through the firewall for LAN access.");
+        hint->setStyleSheet("color:#8a92a6; font-size:11px;");
+        form->addRow(hint);
+
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
+                                             QDialogButtonBox::Cancel);
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        form->addRow(buttons);
+    }
+
+    QCheckBox *enableCheck;
+    QSpinBox *portSpin;
+    QComboBox *rateCombo;
+};
+
+// ---------------------------------------------------------------------------
+
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("RTA — SPL Meter & Spectrum Analyzer");
+        setWindowTitle(APP_NAME);
 
         auto *central = new QWidget;
         setCentralWidget(central);
         central->setStyleSheet("background:#1a1d24; color:#c8cede;");
         auto *root = new QVBoxLayout(central);
 
-        // --- controls row 1: measurement ---
+        buildMenus();
+
+        // --- controls row ---
         auto *ctl = new QHBoxLayout;
         ctl->addWidget(new QLabel("Input:"));
         m_deviceCombo = new QComboBox;
@@ -76,27 +137,6 @@ public:
         ctl->addWidget(resetBtn);
         root->addLayout(ctl);
 
-        // --- controls row 2: API server ---
-        auto *ctl2 = new QHBoxLayout;
-        m_apiCheck = new QCheckBox("HTTP API");
-        m_apiCheck->setToolTip(
-            "Serve live levels and history as JSON so other machines can "
-            "poll them.\nEndpoints: /api/status /api/spl /api/rta "
-            "/api/history");
-        ctl2->addWidget(m_apiCheck);
-        ctl2->addWidget(new QLabel("Port:"));
-        m_portSpin = new QSpinBox;
-        m_portSpin->setRange(1024, 65535);
-        m_portSpin->setValue(8517);
-        ctl2->addWidget(m_portSpin);
-        ctl2->addSpacing(12);
-        m_apiUrlLbl = new QLabel;
-        m_apiUrlLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        m_apiUrlLbl->setStyleSheet("color:#8a92a6;");
-        ctl2->addWidget(m_apiUrlLbl);
-        ctl2->addStretch(1);
-        root->addLayout(ctl2);
-
         // --- SPL readouts ---
         auto *splRow = new QHBoxLayout;
         m_rFast = new SplReadout("LAF (Fast)");
@@ -125,6 +165,9 @@ public:
         root->addWidget(m_history);
 
         statusBar()->setStyleSheet("color:#8a92a6;");
+        m_apiLbl = new QLabel;
+        m_apiLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        statusBar()->addPermanentWidget(m_apiLbl);
 
         m_api = new ApiServer(this);
 
@@ -154,14 +197,6 @@ public:
             m_analyzer.resetLeq();
             m_analyzer.resetPeaks();
         });
-        QObject::connect(m_apiCheck, &QCheckBox::toggled, this, [this](bool) {
-            applyApiState();
-            saveSettings();
-        });
-        QObject::connect(m_portSpin, &QSpinBox::valueChanged, this, [this](int) {
-            applyApiState();
-            saveSettings();
-        });
 
         // --api [port] command-line override (handy for headless testing)
         const QStringList args = QApplication::arguments();
@@ -171,9 +206,9 @@ public:
                 bool ok = false;
                 const int p = args[apiIdx + 1].toInt(&ok);
                 if (ok)
-                    m_portSpin->setValue(p);
+                    m_apiPort = p;
             }
-            m_apiCheck->setChecked(true);
+            m_apiEnabled = true;
         }
 
         m_analyzer.weighting =
@@ -182,6 +217,7 @@ public:
                 : m_weightCombo->currentText()[0].toLatin1();
 
         auto *timer = new QTimer(this);
+        timer->setTimerType(Qt::PreciseTimer);
         timer->setInterval(UPDATE_MS);
         QObject::connect(timer, &QTimer::timeout, this, [this] { tick(); });
         timer->start();
@@ -200,16 +236,75 @@ protected:
     }
 
 private:
+    void buildMenus() {
+        menuBar()->setStyleSheet(
+            "QMenuBar { background:#1a1d24; color:#c8cede; }"
+            "QMenuBar::item:selected { background:#2a2e39; }"
+            "QMenu { background:#232733; color:#c8cede; }"
+            "QMenu::item:selected { background:#2a2e39; }");
+
+        QMenu *fileMenu = menuBar()->addMenu("&File");
+        QAction *quitAct = fileMenu->addAction("&Quit");
+        quitAct->setShortcut(QKeySequence::Quit);
+        connect(quitAct, &QAction::triggered, this, &QWidget::close);
+
+        QMenu *settingsMenu = menuBar()->addMenu("&Settings");
+        QAction *apiAct = settingsMenu->addAction("&API && Streaming…");
+        connect(apiAct, &QAction::triggered, this, [this] { showApiSettings(); });
+
+        QMenu *helpMenu = menuBar()->addMenu("&Help");
+        QAction *aboutAct =
+            helpMenu->addAction(QString("&About %1").arg(APP_NAME));
+        connect(aboutAct, &QAction::triggered, this, [this] { showAbout(); });
+        QAction *aboutQtAct = helpMenu->addAction("About &Qt");
+        connect(aboutQtAct, &QAction::triggered, qApp, &QApplication::aboutQt);
+    }
+
+    void showApiSettings() {
+        ApiSettingsDialog dlg(this, m_apiEnabled, m_apiPort, m_streamRateIdx);
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+        m_apiEnabled = dlg.enableCheck->isChecked();
+        m_apiPort = dlg.portSpin->value();
+        m_streamRateIdx = dlg.rateCombo->currentIndex();
+        applyApiState();
+        saveSettings();
+    }
+
+    void showAbout() {
+        QMessageBox::about(
+            this, QString("About %1").arg(APP_NAME),
+            QString(
+                "<h3>%1</h3>"
+                "<p>Version %2</p>"
+                "<p>A free SPL meter and 1/3-octave real-time analyzer:<br>"
+                "Fast / Slow / Leq with A/C/Z weighting, spectrogram, SPL "
+                "history, and an HTTP + WebSocket API for remote monitoring "
+                "by the ProdMesh production toolkit.</p>"
+                "<p>Levels are relative until calibrated — set the Cal offset "
+                "against a known reference for absolute dB SPL. Not a Class 1 "
+                "measurement instrument.</p>"
+                "<p>Built with Qt %3.</p>")
+                .arg(APP_NAME, APP_VERSION, qVersion()));
+    }
+
     void loadSettings() {
-        QSettings st("RTA", "RTA");
+        QSettings st("ProdMesh", "RemoteRTA");
+        // One-time migration from the pre-rename settings location.
+        if (!st.contains("cal")) {
+            QSettings old("RTA", "RTA");
+            for (const QString &k : old.allKeys())
+                st.setValue(k, old.value(k));
+        }
         m_calSpin->setValue(st.value("cal", 100.0).toDouble());
         const QString w = st.value("weighting", "A").toString();
         if (m_weightCombo->findText(w) >= 0)
             m_weightCombo->setCurrentText(w);
         m_avgCombo->setCurrentIndex(st.value("rtaAvg", 1).toInt());
         m_peakCheck->setChecked(st.value("peakHold", false).toBool());
-        m_apiCheck->setChecked(st.value("apiEnabled", false).toBool());
-        m_portSpin->setValue(st.value("apiPort", 8517).toInt());
+        m_apiEnabled = st.value("apiEnabled", false).toBool();
+        m_apiPort = st.value("apiPort", 8517).toInt();
+        m_streamRateIdx = st.value("streamRate", 2).toInt();  // default 10 Hz
         m_savedDevice = st.value("device").toString();
         const QByteArray geo = st.value("geometry").toByteArray();
         if (!geo.isEmpty())
@@ -217,13 +312,14 @@ private:
     }
 
     void saveSettings() {
-        QSettings st("RTA", "RTA");
+        QSettings st("ProdMesh", "RemoteRTA");
         st.setValue("cal", m_calSpin->value());
         st.setValue("weighting", m_weightCombo->currentText());
         st.setValue("rtaAvg", m_avgCombo->currentIndex());
         st.setValue("peakHold", m_peakCheck->isChecked());
-        st.setValue("apiEnabled", m_apiCheck->isChecked());
-        st.setValue("apiPort", m_portSpin->value());
+        st.setValue("apiEnabled", m_apiEnabled);
+        st.setValue("apiPort", m_apiPort);
+        st.setValue("streamRate", m_streamRateIdx);
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
         st.setValue("geometry", saveGeometry());
@@ -278,24 +374,31 @@ private:
     }
 
     void applyApiState() {
-        if (m_apiCheck->isChecked()) {
-            const quint16 port = quint16(m_portSpin->value());
+        if (m_apiEnabled) {
+            const quint16 port = quint16(m_apiPort);
             if (m_api->listen(port)) {
-                m_apiUrlLbl->setText(
-                    QString("%1/api/spl").arg(ApiServer::localUrl(port)));
+                m_apiLbl->setStyleSheet("color:#8a92a6;");
+                m_apiLbl->setText(
+                    QString("API %1/api").arg(ApiServer::localUrl(port)));
             } else {
-                m_apiUrlLbl->setText(
+                m_apiLbl->setStyleSheet("color:#e05c5c;");
+                m_apiLbl->setText(
                     QString("API error: %1").arg(m_api->errorString()));
             }
         } else {
             m_api->close();
-            m_apiUrlLbl->clear();
+            m_apiLbl->clear();
         }
     }
 
     double rtaTau() const {
         static const double taus[] = {0.0, 0.125, 1.0, 2.0};
         return taus[m_avgCombo->currentIndex()];
+    }
+
+    int streamIntervalMs() const {
+        static const int ms[] = {1000, 200, 100, 50};
+        return ms[std::clamp(m_streamRateIdx, 0, 3)];
     }
 
     void tick() {
@@ -311,7 +414,14 @@ private:
         }
         if (!have)
             return;
-        const double dt = UPDATE_MS / 1000.0;
+        // Use measured elapsed time so Fast/Slow ballistics stay accurate
+        // even when the OS delivers timer ticks late.
+        const qint64 nowTick = QDateTime::currentMSecsSinceEpoch();
+        const double dt =
+            m_lastTickMs > 0
+                ? std::clamp((nowTick - m_lastTickMs) / 1000.0, 0.01, 0.5)
+                : UPDATE_MS / 1000.0;
+        m_lastTickMs = nowTick;
         AnalyzerResult res = m_analyzer.process(m_samples, dt, rtaTau(),
                                                 m_peakCheck->isChecked());
         const double cal = m_calSpin->value();
@@ -347,6 +457,12 @@ private:
             m_api->pushHistory(
                 {now, res.fast + cal, res.slow + cal, res.leq + cal});
         }
+        // -UPDATE_MS/2: the check runs on the tick grid, so without slack a
+        // 100 ms interval lands on alternating 100/150 ms ticks (~8 Hz).
+        if (now - m_lastStream >= streamIntervalMs() - UPDATE_MS / 2) {
+            m_lastStream = now;
+            m_api->broadcastSnapshot();
+        }
     }
 
     AudioEngine m_engine;
@@ -355,14 +471,15 @@ private:
     QList<QAudioDevice> m_devices;
     QString m_savedDevice;
     ApiServer *m_api;
+    bool m_apiEnabled = false;
+    int m_apiPort = 8517;
+    int m_streamRateIdx = 2;  // 10 Hz
     QComboBox *m_deviceCombo;
     QComboBox *m_weightCombo;
     QComboBox *m_avgCombo;
     QCheckBox *m_peakCheck;
     QDoubleSpinBox *m_calSpin;
-    QCheckBox *m_apiCheck;
-    QSpinBox *m_portSpin;
-    QLabel *m_apiUrlLbl;
+    QLabel *m_apiLbl;
     QLabel *m_clipLbl;
     SplReadout *m_rFast;
     SplReadout *m_rSlow;
@@ -373,6 +490,8 @@ private:
     QTabWidget *m_tabs;
     int m_clipTicks = 0;
     qint64 m_lastHistPush = 0;
+    qint64 m_lastStream = 0;
+    qint64 m_lastTickMs = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -417,6 +536,9 @@ int main(int argc, char *argv[]) {
         if (std::strcmp(argv[i], "--selftest") == 0)
             return selftest();
     QApplication app(argc, argv);
+    app.setApplicationName("ProdMesh Remote RTA");
+    app.setOrganizationName("ProdMesh");
+    app.setApplicationVersion(APP_VERSION);
     MainWindow win;
     win.resize(1000, 720);
     win.show();

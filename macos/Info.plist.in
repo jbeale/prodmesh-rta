@@ -5,13 +5,15 @@
     <key>CFBundleExecutable</key>
     <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>
-    <string>com.rta.analyzer</string>
+    <string>com.prodmesh.remote-rta</string>
     <key>CFBundleName</key>
-    <string>RTA</string>
+    <string>ProdMesh Remote RTA</string>
+    <key>CFBundleDisplayName</key>
+    <string>ProdMesh Remote RTA</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>0.2.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>

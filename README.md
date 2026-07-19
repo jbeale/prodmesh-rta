@@ -1,7 +1,8 @@
-# RTA — SPL Meter & Spectrum Analyzer
+# ProdMesh Remote RTA
 
-A minimal, free, cross-platform (Windows / macOS) alternative to a paid RTA app:
-point it at any microphone input and get
+A minimal, free, cross-platform (Windows / macOS) SPL meter and spectrum
+analyzer, part of the ProdMesh production toolkit: point it at any microphone
+input and get
 
 - **SPL meter** — Fast (125 ms), Slow (1 s), and Leq (average since reset),
   with **A / C / Z** frequency weighting
@@ -15,7 +16,8 @@ The C++ version additionally has:
 - **SPL history strip** — the last 10 minutes of Fast/Slow at a glance
 - **Persistent settings** — cal, weighting, device, averaging, API config,
   and window geometry survive restarts
-- **HTTP API** — JSON endpoints other machines can poll (see below)
+- **HTTP + WebSocket API** — JSON endpoints other machines can poll, plus a
+  live push stream (see below); configured from **Settings → API & Streaming**
 
 Two equivalent implementations live in this repo:
 
@@ -63,14 +65,21 @@ pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
           mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-multimedia
 cmake -B build -G Ninja
 cmake --build build
-./build/rta.exe
+./build/ProdMeshRemoteRTA.exe
+```
+
+With the official Qt installer (Qt 6.x + MinGW kit):
+
+```
+cmake -B build -G Ninja -DCMAKE_PREFIX_PATH=C:\Qt\6.11.1\mingw_64
+cmake --build build
 ```
 
 With MSVC + the official Qt installer instead:
 `cmake -B build -DCMAKE_PREFIX_PATH=C:\Qt\6.x.x\msvc2022_64 && cmake --build build --config Release`
 
 To make a self-contained folder you can copy to another PC, run
-`windeployqt build/rta.exe`.
+`windeployqt build/ProdMeshRemoteRTA.exe`.
 
 ### macOS
 
@@ -78,14 +87,16 @@ To make a self-contained folder you can copy to another PC, run
 brew install qt cmake ninja
 cmake -B build -G Ninja
 cmake --build build
-open build/rta.app
+open build/ProdMeshRemoteRTA.app
 ```
 
 The app bundle includes the microphone-permission string, so macOS will
-prompt on first launch. `macdeployqt build/rta.app` makes it portable.
+prompt on first launch. `macdeployqt build/ProdMeshRemoteRTA.app` makes it
+portable.
 
-`rta --selftest` runs the same DSP check as the Python version (on Windows
-the output only appears when redirected: `rta.exe --selftest > out.txt`).
+`--selftest` runs the same DSP check as the Python version (on Windows the
+output only appears when redirected:
+`ProdMeshRemoteRTA.exe --selftest > out.txt`).
 
 ## Using it
 
@@ -109,12 +120,13 @@ and adjust **Cal** until the readout matches. That offset stays valid for that
 mic at that input-gain setting. Uncalibrated, the numbers are still perfectly
 usable as *relative* measurements.
 
-## HTTP API (C++ version)
+## HTTP + WebSocket API (C++ version)
 
-Tick **HTTP API** in the app (or launch with `rta --api 8517`). The URL shown
-next to the checkbox is reachable from any machine on the LAN — allow the app
-through the firewall when Windows asks. All endpoints are read-only GETs
-returning JSON with `Access-Control-Allow-Origin: *`:
+Enable it under **Settings → API & Streaming…** (or launch with
+`ProdMeshRemoteRTA --api 8517`). The URL in the status bar is reachable from
+any machine on the LAN — allow the app through the firewall when Windows
+asks. All endpoints are read-only GETs returning JSON with
+`Access-Control-Allow-Origin: *`:
 
 | Endpoint | Returns |
 |---|---|
@@ -122,6 +134,22 @@ returning JSON with `Access-Control-Allow-Origin: *`:
 | `/api/spl` | current `fast_db`, `slow_db`, `leq_db` (dB SPL, cal applied) |
 | `/api/rta` | `centers_hz` + `bands_db` (31 values) + `peaks_db` |
 | `/api/history?since_ms=&limit=` | 1 Hz SPL samples, up to 6 hours |
+| `ws://…/api/stream` | WebSocket: pushes SPL + bands at the configured rate |
+
+### Live streaming
+
+Connect a WebSocket to `/api/stream` on the same port and you'll receive a
+`{"type":"levels", …}` message (same fields as `/api/spl` + `/api/rta`) at
+the stream rate chosen in Settings (1/5/10/20 Hz, default 10):
+
+```js
+// Node.js 21+ / browsers (Node <21: npm i ws, then `new (require("ws"))(url)`)
+const ws = new WebSocket("ws://192.168.1.18:8517/api/stream");
+ws.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  console.log(m.fast_db, m.slow_db, m.bands_db);
+};
+```
 
 `/api/history` is designed for logging a whole event with cheap incremental
 polls — pass the timestamp of the last sample you already have:

@@ -1,5 +1,5 @@
-// Minimal read-only HTTP/JSON API so external tools (e.g. a logger on
-// another machine) can poll live levels and fetch service-long history.
+// HTTP/JSON + WebSocket API so external tools (e.g. ProdMesh on another
+// machine) can poll or stream live levels and fetch service-long history.
 //
 //   GET /api/status            server + measurement configuration
 //   GET /api/spl               current Fast/Slow/Leq in dB SPL
@@ -7,11 +7,15 @@
 //   GET /api/history           1 Hz SPL samples, up to 6 h
 //         ?since_ms=<epoch ms>  only samples newer than this (incremental poll)
 //         ?limit=<n>            at most n newest samples
+//   WS  /api/stream            pushes the /api/spl+/api/rta payload at the
+//                              configured stream rate (RFC 6455 text frames)
 //
-// All responses are JSON with Access-Control-Allow-Origin: *. GET only —
-// nothing on this server mutates state.
+// JSON responses carry Access-Control-Allow-Origin: *. GET only — nothing on
+// this server mutates state. The WebSocket side is hand-rolled on QTcpServer
+// (server->client push only) so no extra Qt modules are required.
 #pragma once
 
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -24,7 +28,9 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <algorithm>
 #include <deque>
+#include <vector>
 
 #include "dsp.h"
 
@@ -50,6 +56,8 @@ public:
             while (QTcpSocket *sock = m_server.nextPendingConnection()) {
                 connect(sock, &QTcpSocket::readyRead, sock,
                         [this, sock] { onData(sock); });
+                connect(sock, &QTcpSocket::disconnected, this,
+                        [this, sock] { removeStream(sock); });
                 connect(sock, &QTcpSocket::disconnected, sock,
                         &QObject::deleteLater);
             }
@@ -60,12 +68,18 @@ public:
         close();
         return m_server.listen(QHostAddress::Any, port);
     }
+
     void close() {
         if (m_server.isListening())
             m_server.close();
+        for (QTcpSocket *s : m_streams)
+            s->disconnectFromHost();
+        m_streams.clear();
     }
+
     bool isListening() const { return m_server.isListening(); }
     QString errorString() const { return m_server.errorString(); }
+    int streamClientCount() const { return int(m_streams.size()); }
 
     void setSnapshot(const Snapshot &s) { m_snap = s; }
 
@@ -73,6 +87,16 @@ public:
         m_hist.push_back(h);
         while (m_hist.size() > kMaxHist)
             m_hist.pop_front();
+    }
+
+    // Push the current snapshot to every /api/stream WebSocket client.
+    void broadcastSnapshot() {
+        if (m_streams.empty())
+            return;
+        const QByteArray payload =
+            QJsonDocument(levelsJson()).toJson(QJsonDocument::Compact);
+        for (QTcpSocket *s : m_streams)
+            sendFrame(s, 0x1, payload);
     }
 
     // Best URL to reach this machine from the LAN.
@@ -94,7 +118,31 @@ private:
         return a;
     }
 
+    QJsonObject levelsJson() const {
+        QJsonArray centers;
+        for (double c : THIRD_OCT_CENTERS)
+            centers.append(c);
+        QJsonObject o{
+            {"type", "levels"},
+            {"time_ms", m_snap.timeMs},
+            {"weighting", m_snap.weighting},
+            {"cal_db", m_snap.cal},
+            {"fast_db", jnum(m_snap.fast)},
+            {"slow_db", jnum(m_snap.slow)},
+            {"leq_db", jnum(m_snap.leq)},
+            {"centers_hz", centers},
+            {"bands_db", jarr(m_snap.bands)},
+        };
+        o.insert("peaks_db",
+                 m_snap.peaks.empty() ? QJsonValue() : jarr(m_snap.peaks));
+        return o;
+    }
+
     void onData(QTcpSocket *sock) {
+        if (sock->property("ws").toBool()) {
+            onWsData(sock);
+            return;
+        }
         QByteArray buf = sock->property("reqbuf").toByteArray() + sock->readAll();
         sock->setProperty("reqbuf", buf);
         const int hdrEnd = buf.indexOf("\r\n\r\n");
@@ -103,7 +151,10 @@ private:
                 sock->close();
             return;
         }
-        const QByteArray reqLine = buf.left(buf.indexOf("\r\n"));
+        const QByteArray header = buf.left(hdrEnd);
+        const QByteArray reqLine = header.left(header.indexOf("\r\n") >= 0
+                                                   ? header.indexOf("\r\n")
+                                                   : header.size());
         const QList<QByteArray> parts = reqLine.split(' ');
         if (parts.size() < 2) {
             respond(sock, 400, QJsonDocument(QJsonObject{{"error", "bad request"}}));
@@ -119,10 +170,115 @@ private:
             respond(sock, 405, QJsonDocument(QJsonObject{{"error", "GET only"}}));
             return;
         }
+        if (QUrl(target).path() == "/api/stream") {
+            upgradeToWs(sock, header);
+            return;
+        }
         bool found = true;
         const QJsonDocument doc = route(target, found);
         respond(sock, found ? 200 : 404, doc);
     }
+
+    // --- WebSocket (RFC 6455, server push only) ---
+
+    void upgradeToWs(QTcpSocket *sock, const QByteArray &header) {
+        QByteArray key;
+        for (const QByteArray &line : header.split('\r')) {
+            const QByteArray l = line.startsWith('\n') ? line.mid(1) : line;
+            if (l.toLower().startsWith("sec-websocket-key:"))
+                key = l.mid(int(strlen("sec-websocket-key:"))).trimmed();
+        }
+        if (key.isEmpty()) {
+            respond(sock, 400,
+                    QJsonDocument(QJsonObject{
+                        {"error", "WebSocket endpoint — connect with ws://"}}));
+            return;
+        }
+        const QByteArray accept =
+            QCryptographicHash::hash(
+                key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
+                QCryptographicHash::Sha1)
+                .toBase64();
+        sock->write("HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    "Sec-WebSocket-Accept: " + accept + "\r\n\r\n");
+        sock->setProperty("ws", true);
+        sock->setProperty("reqbuf", QByteArray());
+        m_streams.push_back(sock);
+        // Greet with the current snapshot so clients render immediately.
+        sendFrame(sock, 0x1,
+                  QJsonDocument(levelsJson()).toJson(QJsonDocument::Compact));
+    }
+
+    void onWsData(QTcpSocket *sock) {
+        QByteArray buf = sock->property("wsbuf").toByteArray() + sock->readAll();
+        while (buf.size() >= 2) {
+            const quint8 b0 = quint8(buf[0]);
+            const quint8 b1 = quint8(buf[1]);
+            const quint8 opcode = b0 & 0x0F;
+            const bool masked = b1 & 0x80;
+            qint64 len = b1 & 0x7F;
+            int pos = 2;
+            if (len == 126) {
+                if (buf.size() < 4)
+                    break;
+                len = (quint8(buf[2]) << 8) | quint8(buf[3]);
+                pos = 4;
+            } else if (len == 127) {
+                if (buf.size() < 10)
+                    break;
+                len = 0;
+                for (int i = 0; i < 8; ++i)
+                    len = (len << 8) | quint8(buf[2 + i]);
+                pos = 10;
+            }
+            const int maskPos = pos;
+            if (masked)
+                pos += 4;
+            if (buf.size() < pos + len)
+                break;
+            QByteArray payload = buf.mid(pos, int(len));
+            if (masked)
+                for (int i = 0; i < payload.size(); ++i)
+                    payload[i] = payload[i] ^ buf[maskPos + (i & 3)];
+            if (opcode == 0x8) {  // close
+                sendFrame(sock, 0x8, payload);
+                sock->disconnectFromHost();
+            } else if (opcode == 0x9) {  // ping -> pong
+                sendFrame(sock, 0xA, payload);
+            }
+            buf.remove(0, int(pos + len));
+        }
+        sock->setProperty("wsbuf", buf);
+    }
+
+    static void sendFrame(QTcpSocket *sock, quint8 opcode,
+                          const QByteArray &payload) {
+        QByteArray f;
+        f.append(char(0x80 | opcode));
+        const qint64 n = payload.size();
+        if (n < 126) {
+            f.append(char(n));
+        } else if (n < 65536) {
+            f.append(char(126));
+            f.append(char((n >> 8) & 0xFF));
+            f.append(char(n & 0xFF));
+        } else {
+            f.append(char(127));
+            for (int i = 7; i >= 0; --i)
+                f.append(char((n >> (8 * i)) & 0xFF));
+        }
+        f.append(payload);
+        sock->write(f);
+    }
+
+    void removeStream(QTcpSocket *sock) {
+        m_streams.erase(std::remove(m_streams.begin(), m_streams.end(), sock),
+                        m_streams.end());
+    }
+
+    // --- HTTP routing ---
 
     QJsonDocument route(const QString &target, bool &found) {
         const QUrl url = QUrl(target);
@@ -132,14 +288,16 @@ private:
 
         if (path == "/" || path == "/api" || path == "/api/") {
             return QJsonDocument(QJsonObject{
-                {"app", "rta"},
-                {"endpoints", QJsonArray{"/api/status", "/api/spl", "/api/rta",
-                                         "/api/history?since_ms=&limit="}},
+                {"app", "prodmesh-remote-rta"},
+                {"endpoints",
+                 QJsonArray{"/api/status", "/api/spl", "/api/rta",
+                            "/api/history?since_ms=&limit=",
+                            "ws: /api/stream"}},
             });
         }
         if (path == "/api/status") {
             return QJsonDocument(QJsonObject{
-                {"app", "rta"},
+                {"app", "prodmesh-remote-rta"},
                 {"samplerate", m_snap.samplerate},
                 {"weighting", m_snap.weighting},
                 {"cal_db", m_snap.cal},
@@ -148,6 +306,7 @@ private:
                 {"uptime_s", double(m_started.elapsed()) / 1000.0},
                 {"time_ms", now},
                 {"history_len", int(m_hist.size())},
+                {"stream_clients", int(m_streams.size())},
             });
         }
         if (path == "/api/spl") {
@@ -161,18 +320,8 @@ private:
             });
         }
         if (path == "/api/rta") {
-            QJsonArray centers;
-            for (double c : THIRD_OCT_CENTERS)
-                centers.append(c);
-            QJsonObject o{
-                {"time_ms", now},
-                {"weighting", m_snap.weighting},
-                {"cal_db", m_snap.cal},
-                {"centers_hz", centers},
-                {"bands_db", jarr(m_snap.bands)},
-            };
-            o.insert("peaks_db",
-                     m_snap.peaks.empty() ? QJsonValue() : jarr(m_snap.peaks));
+            QJsonObject o = levelsJson();
+            o.remove("type");
             return QJsonDocument(o);
         }
         if (path == "/api/history") {
@@ -182,9 +331,9 @@ private:
                                : qint64(kMaxHist);
             limit = std::clamp<qint64>(limit, 0, qint64(kMaxHist));
             QJsonArray samples;
-            qint64 skipped = qint64(m_hist.size());
-            for (auto it = m_hist.begin(); it != m_hist.end(); ++it, --skipped) {
-                if (it->t <= since || skipped > limit)
+            qint64 remaining = qint64(m_hist.size());
+            for (auto it = m_hist.begin(); it != m_hist.end(); ++it, --remaining) {
+                if (it->t <= since || remaining > limit)
                     continue;
                 samples.append(QJsonObject{
                     {"t", it->t},
@@ -229,5 +378,6 @@ private:
     QTcpServer m_server;
     Snapshot m_snap;
     std::deque<HistSample> m_hist;
+    std::vector<QTcpSocket *> m_streams;
     QElapsedTimer m_started;
 };
