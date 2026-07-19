@@ -9,6 +9,14 @@ point it at any microphone input and get
   selectable averaging and peak hold
 - Input device picker, clip indicator, calibration offset
 
+The C++ version additionally has:
+
+- **Spectrogram** — scrolling 30 s log-frequency heat map (tab next to RTA)
+- **SPL history strip** — the last 10 minutes of Fast/Slow at a glance
+- **Persistent settings** — cal, weighting, device, averaging, API config,
+  and window geometry survive restarts
+- **HTTP API** — JSON endpoints other machines can poll (see below)
+
 Two equivalent implementations live in this repo:
 
 - **Python** — `rta.py` (PySide6 + sounddevice + NumPy). Zero build step.
@@ -100,6 +108,44 @@ at the mic — a 94 dB calibrator, or side-by-side with a meter/app you trust �
 and adjust **Cal** until the readout matches. That offset stays valid for that
 mic at that input-gain setting. Uncalibrated, the numbers are still perfectly
 usable as *relative* measurements.
+
+## HTTP API (C++ version)
+
+Tick **HTTP API** in the app (or launch with `rta --api 8517`). The URL shown
+next to the checkbox is reachable from any machine on the LAN — allow the app
+through the firewall when Windows asks. All endpoints are read-only GETs
+returning JSON with `Access-Control-Allow-Origin: *`:
+
+| Endpoint | Returns |
+|---|---|
+| `/api/status` | sample rate, weighting, cal, uptime, history length |
+| `/api/spl` | current `fast_db`, `slow_db`, `leq_db` (dB SPL, cal applied) |
+| `/api/rta` | `centers_hz` + `bands_db` (31 values) + `peaks_db` |
+| `/api/history?since_ms=&limit=` | 1 Hz SPL samples, up to 6 hours |
+
+`/api/history` is designed for logging a whole event with cheap incremental
+polls — pass the timestamp of the last sample you already have:
+
+```js
+// Node.js: collect SPL over the course of a service
+const BASE = "http://192.168.1.18:8517";   // shown in the RTA app
+let since = 0;
+setInterval(async () => {
+  const { samples } = await (
+    await fetch(`${BASE}/api/history?since_ms=${since}`)
+  ).json();
+  if (samples.length) {
+    since = samples.at(-1).t;
+    for (const s of samples) {
+      // s = { t: epoch ms, fast_db, slow_db, leq_db }
+      store(s);
+    }
+  }
+}, 30_000);  // any interval ≤ 6 h works; history survives between polls
+```
+
+Levels are `null` in JSON until the input has data. History is in-memory and
+clears when the app closes.
 
 ## Troubleshooting
 

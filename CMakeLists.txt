@@ -4,11 +4,11 @@ project(rta VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia Network)
 qt_standard_project_setup()
 
-qt_add_executable(rta src/main.cpp)
-target_link_libraries(rta PRIVATE Qt6::Widgets Qt6::Multimedia)
+qt_add_executable(rta src/main.cpp src/dsp.h src/audio.h src/widgets.h src/api.h)
+target_link_libraries(rta PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::Network)
 
 if(WIN32)
     # GUI subsystem (no console window). Note: `rta.exe --selftest` output is
