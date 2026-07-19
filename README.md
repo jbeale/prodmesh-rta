@@ -217,6 +217,15 @@ clears when the app closes.
   unconnected line-in jack) or the mic's input gain is near zero in the OS
   sound settings.
 
+## License
+
+This project's code is MIT-licensed (see [LICENSE](LICENSE)). It dynamically
+links Qt (and, for the Python version, PySide6), which are used under the
+terms of the **LGPLv3** — the Qt libraries are shipped as separate,
+replaceable DLLs/frameworks and remain under their own license. Qt source is
+available at <https://code.qt.io>. Do not switch to a statically linked Qt
+build without revisiting LGPL compliance.
+
 ## Notes / limits
 
 - Levels are computed from a 16k FFT (Hann window); Fast/Slow are exponential
