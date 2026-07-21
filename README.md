@@ -320,4 +320,7 @@ build without revisiting LGPL compliance.
 - A DSP sanity check is built in: `--selftest` (both versions) verifies a
   full-scale 1 kHz sine reads −3.01 dBFS in the 1 kHz band. The C++ version
   additionally checks the hi-res spectrum peak, the A/C/Z broadband powers,
-  the time-domain C-weighting filter's 1 kHz gain, and mic-correction math.
+  the time-domain C-weighting filter's 1 kHz gain, mic-correction math, and
+  the metrics engine (rolling Leq windows, C-A ratio, L10/L50/L90
+  percentiles, and NIOSH/OSHA dose against closed-form expected values).
+  CI runs it on both platforms and it gates releases.

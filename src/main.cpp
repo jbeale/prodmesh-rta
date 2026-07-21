@@ -1372,6 +1372,51 @@ private:
 // ---------------------------------------------------------------------------
 
 // Verify DSP math with a synthetic full-scale 1 kHz sine (no audio, no GUI).
+// MetricsEngine has closed-form expected values for constant inputs, so it
+// gets exact regression checks (tolerances only absorb float rounding).
+static bool metricsSelftest() {
+    bool ok = true;
+
+    // 120 s of constant 0 dB A-power with C-power 3 dB hotter: both Leq
+    // windows read 0 dB and C-A reads the 3.01 dB difference.
+    MetricsEngine eng;
+    for (int i = 0; i < 240; ++i)
+        eng.push(1.0, 2.0, 1.0, 1.0, 0.5, 0.0);
+    MetricValues v = eng.values(0.0);
+    std::printf("metrics: leqS = %.2f, leqL = %.2f (expected 0.00), "
+                "C-A = %.2f (expected 3.01), LZpk = %.2f (expected 0.00)\n",
+                v.leqShort, v.leqLong, v.ca, v.lzpk);
+    ok = ok && std::fabs(v.leqShort) < 0.01 && std::fabs(v.leqLong) < 0.01 &&
+         std::fabs(v.ca - 3.01) < 0.01 && std::fabs(v.lzpk) < 0.01;
+
+    // Percentiles: 80 s at 0 dB + 20 s at 10 dB -> L10 = 10, L50 = L90 = 0.
+    MetricsEngine pct;
+    for (int i = 0; i < 80; ++i)
+        pct.push(1.0, 1.0, 1.0, 1.0, 1.0, 0.0);
+    for (int i = 0; i < 20; ++i)
+        pct.push(10.0, 10.0, 1.0, 1.0, 1.0, 0.0);
+    v = pct.values(0.0);
+    std::printf("metrics: L10 = %.2f (expected 10), L50 = %.2f, L90 = %.2f "
+                "(expected 0)\n",
+                v.l10, v.l50, v.l90);
+    ok = ok && std::fabs(v.l10 - 10.0) < 0.01 && std::fabs(v.l50) < 0.01 &&
+         std::fabs(v.l90) < 0.01;
+
+    // Dose: 8 h at exactly 85 dBA = 100% NIOSH (criterion level) and 50%
+    // OSHA (5 dB exchange rate, 90 dB criterion -> half rate at 85).
+    MetricsEngine dose;
+    const double p85 = std::pow(10.0, 8.5);
+    for (int i = 0; i < 8 * 3600; ++i)
+        dose.push(p85, p85, 1.0, 1.0, 1.0, 0.0);
+    v = dose.values(0.0);
+    std::printf("metrics: 8 h @ 85 dBA -> NIOSH %.1f%% (expected 100), "
+                "OSHA %.1f%% (expected 50)\n",
+                v.doseNiosh, v.doseOsha);
+    ok = ok && std::fabs(v.doseNiosh - 100.0) < 0.5 &&
+         std::fabs(v.doseOsha - 50.0) < 0.5;
+    return ok;
+}
+
 static int selftest() {
     Analyzer an;
     an.sr = 48000;
@@ -1441,6 +1486,8 @@ static int selftest() {
     std::printf("with flat +6 dB mic file: fast = %.2f dBFS (expected ~ -9.01)\n",
                 res.fast);
     ok = ok && std::fabs(res.fast + 9.01) < 0.25;
+
+    ok = metricsSelftest() && ok;
 
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
