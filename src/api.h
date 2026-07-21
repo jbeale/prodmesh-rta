@@ -45,6 +45,8 @@ public:
         std::vector<double> bands;                    // dB SPL
         std::vector<double> peaks;                    // empty if peak hold off
         QString micCorr;                              // cal file name, or empty
+        // Derived SPL metrics (id -> value); see the Metrics dialog for ids.
+        std::vector<std::pair<QString, double>> metrics;
     };
     struct HistSample {
         qint64 t = 0;
@@ -136,7 +138,15 @@ private:
         };
         o.insert("peaks_db",
                  m_snap.peaks.empty() ? QJsonValue() : jarr(m_snap.peaks));
+        o.insert("metrics", metricsJson());
         return o;
+    }
+
+    QJsonObject metricsJson() const {
+        QJsonObject met;
+        for (const auto &m : m_snap.metrics)
+            met.insert(m.first, jnum(m.second));
+        return met;
     }
 
     void onData(QTcpSocket *sock) {
@@ -322,6 +332,7 @@ private:
                 {"fast_db", jnum(m_snap.fast)},
                 {"slow_db", jnum(m_snap.slow)},
                 {"leq_db", jnum(m_snap.leq)},
+                {"metrics", metricsJson()},
             });
         }
         if (path == "/api/rta") {

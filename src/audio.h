@@ -35,6 +35,8 @@ public:
             m_pos = 0;
             m_total = 0;
             m_peak = 0.0f;
+            m_peakC = 0.0f;
+            m_cw.design(fmt.sampleRate());
         }
         m_source = new QAudioSource(dev, fmt);
         m_io = m_source->start();
@@ -59,11 +61,15 @@ public:
     int sampleRate() const { return m_format.sampleRate(); }
 
     // Fills `out` with the most recent n samples. Returns false while the
-    // ring buffer is still filling. `peakOut` is the peak since last call.
-    bool latest(int n, std::vector<float> &out, float &peakOut) {
+    // ring buffer is still filling. `peakOut` / `peakCOut` are the raw and
+    // C-weighted sample peaks since the last call.
+    bool latest(int n, std::vector<float> &out, float &peakOut,
+                float &peakCOut) {
         QMutexLocker lock(&m_mutex);
         peakOut = m_peak;
         m_peak = 0.0f;
+        peakCOut = m_peakC;
+        m_peakC = 0.0f;
         const qint64 filled = std::min<qint64>(m_total, qint64(m_buf.size()));
         if (filled < n)
             return false;
@@ -141,6 +147,9 @@ private:
             const float mag = std::fabs(m_conv[i]);
             if (mag > m_peak)
                 m_peak = mag;
+            const float magC = float(std::fabs(m_cw.step(m_conv[i])));
+            if (magC > m_peakC)
+                m_peakC = magC;
         }
         m_total += frames;
     }
@@ -154,4 +163,6 @@ private:
     int m_pos = 0;
     qint64 m_total = 0;
     float m_peak = 0.0f;
+    float m_peakC = 0.0f;
+    CWeightFilter m_cw;
 };

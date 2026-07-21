@@ -71,10 +71,61 @@ inline double toDb(double power) {
     return 10.0 * std::log10(std::max(power, 1e-20));
 }
 
+// Streaming time-domain C-weighting: two 1st-order highpasses at 20.6 Hz and
+// two 1st-order lowpasses at 12.2 kHz (bilinear transform, prewarped), unity
+// gain at 1 kHz. Used for LCpk metering — approximate near Nyquist, not an
+// IEC 61672 implementation.
+class CWeightFilter {
+public:
+    void design(double fs) {
+        auto onePole = [&](double f0, bool hp, double c[3]) {
+            const double W = std::tan(kPi * f0 / fs);
+            const double n = 1.0 / (1.0 + W);
+            c[2] = (W - 1.0) * n;  // a1
+            c[0] = hp ? n : W * n;
+            c[1] = hp ? -n : W * n;
+        };
+        onePole(20.598997, true, m_c[0]);
+        onePole(20.598997, true, m_c[1]);
+        onePole(12194.217, false, m_c[2]);
+        onePole(12194.217, false, m_c[3]);
+        const std::complex<double> z =
+            std::exp(std::complex<double>(0.0, -2.0 * kPi * 1000.0 / fs));
+        std::complex<double> H(1.0, 0.0);
+        for (const auto &c : m_c)
+            H *= (c[0] + c[1] * z) / (1.0 + c[2] * z);
+        m_gain = 1.0 / std::abs(H);
+        reset();
+    }
+
+    void reset() {
+        for (int i = 0; i < 4; ++i)
+            m_x[i] = m_y[i] = 0.0;
+    }
+
+    double step(double x) {
+        for (int i = 0; i < 4; ++i) {
+            const double y = m_c[i][0] * x + m_c[i][1] * m_x[i] - m_c[i][2] * m_y[i];
+            m_x[i] = x;
+            m_y[i] = y;
+            x = y;
+        }
+        return x * m_gain;
+    }
+
+private:
+    double m_c[4][3] = {};
+    double m_x[4] = {}, m_y[4] = {};
+    double m_gain = 1.0;
+};
+
 struct AnalyzerResult {
     double fast = kNaN;
     double slow = kNaN;
     double leq = kNaN;
+    // Broadband mean-square power (linear, dBFS domain) under each standard
+    // weighting, independent of the display weighting — for derived metrics.
+    double powA = 0.0, powC = 0.0, powZ = 0.0;
     std::vector<double> bands;
     std::vector<double> peaks;  // empty when peak hold is off
 };
@@ -134,17 +185,26 @@ public:
             m_fftBuf[i] = std::complex<double>(x[i] * m_window[i], 0.0);
         fft(m_fftBuf);
         const int nBins = FFT_SIZE / 2 + 1;
+        const std::vector<double> *sel =
+            weighting == 'A' ? &m_wA : weighting == 'C' ? &m_wC : nullptr;
         for (int k = 0; k < nBins; ++k) {
             double p = std::norm(m_fftBuf[k]);
             if (k != 0 && k != FFT_SIZE / 2)
                 p *= 2.0;
-            m_power[k] = p / m_winNorm * m_wlin[k];  // per-bin weighted power
+            const double pz = p / m_winNorm * m_micLin[k];  // mic-corrected
+            m_powerZ[k] = pz;
+            m_power[k] = sel ? pz * (*sel)[k] : pz;  // display weighting
         }
 
-        // Broadband SPL (20 Hz - 20 kHz), exponential time weighting on power
-        double P = 0.0;
-        for (int k = m_splLo; k <= m_splHi; ++k)
-            P += m_power[k];
+        // Broadband SPL (20 Hz - 20 kHz) under all three weightings;
+        // exponential time weighting on power for the displayed one.
+        double PA = 0.0, PC = 0.0, PZ = 0.0;
+        for (int k = m_splLo; k <= m_splHi; ++k) {
+            PA += m_powerZ[k] * m_wA[k];
+            PC += m_powerZ[k] * m_wC[k];
+            PZ += m_powerZ[k];
+        }
+        const double P = weighting == 'A' ? PA : weighting == 'C' ? PC : PZ;
         const double aFast = std::exp(-dt / 0.125);
         const double aSlow = std::exp(-dt / 1.0);
         m_fastP = m_hasFast ? aFast * m_fastP + (1 - aFast) * P : P;
@@ -185,6 +245,9 @@ public:
         res.fast = toDb(m_fastP);
         res.slow = toDb(m_slowP);
         res.leq = toDb(m_leqSum / std::max<qint64>(m_leqN, 1));
+        res.powA = PA;
+        res.powC = PC;
+        res.powZ = PZ;
         res.bands.resize(NUM_BANDS);
         for (int i = 0; i < NUM_BANDS; ++i)
             res.bands[i] = std::isfinite(m_bandP[i]) ? toDb(m_bandP[i]) : kNaN;
@@ -223,17 +286,18 @@ private:
         const double df = double(sr) / FFT_SIZE;
         m_fftBuf.resize(FFT_SIZE);
         m_power.resize(nBins);
-        m_wlin.resize(nBins);
+        m_powerZ.resize(nBins);
+        m_wA.resize(nBins);
+        m_wC.resize(nBins);
+        m_micLin.resize(nBins);
         for (int k = 0; k < nBins; ++k) {
             const double f = k * df;
-            double wdb = 0.0;
-            if (weighting == 'A')
-                wdb = aWeightDb(f);
-            else if (weighting == 'C')
-                wdb = cWeightDb(f);
-            if (!m_micCorr.empty())
-                wdb -= micCorrDb(f);
-            m_wlin[k] = std::pow(10.0, wdb / 10.0);
+            m_wA[k] = std::pow(10.0, aWeightDb(f) / 10.0);
+            m_wC[k] = std::pow(10.0, cWeightDb(f) / 10.0);
+            m_micLin[k] =
+                m_micCorr.empty()
+                    ? 1.0
+                    : std::pow(10.0, -micCorrDb(f) / 10.0);
         }
         m_splLo = int(std::ceil(20.0 / df));
         m_splHi = std::min(nBins - 1, int(std::floor(20000.0 / df)));
@@ -286,7 +350,9 @@ private:
     double m_winNorm = 1.0;
     std::vector<std::complex<double>> m_fftBuf;
     std::vector<double> m_power;
-    std::vector<double> m_wlin;
+    std::vector<double> m_powerZ;
+    std::vector<double> m_wA, m_wC;
+    std::vector<double> m_micLin;
     std::vector<Band> m_bands;
     int m_splLo = 0, m_splHi = 0;
     int m_cachedSr = -1;

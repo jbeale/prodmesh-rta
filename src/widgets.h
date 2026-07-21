@@ -5,6 +5,7 @@
 #include <QCloseEvent>
 #include <QColor>
 #include <QFont>
+#include <QHash>
 #include <QImage>
 #include <QLabel>
 #include <QMouseEvent>
@@ -12,6 +13,7 @@
 #include <QPainterPath>
 #include <QPen>
 #include <QStringList>
+#include <QStyleOption>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -503,16 +505,25 @@ public:
         lay->addWidget(m_val);
     }
 
-    void set(const QString &caption, double valueDb) {
+    void set(const QString &caption, double value,
+             const QString &suffix = QString()) {
         m_cap->setText(caption);
-        m_val->setText(std::isfinite(valueDb)
-                           ? QString::number(valueDb, 'f', 1)
+        m_val->setText(std::isfinite(value)
+                           ? QString::number(value, 'f', 1) + suffix
                            : QString("--.-"));
     }
 
 private:
     QLabel *m_cap;
     QLabel *m_val;
+};
+
+// One displayed metric: which, how to caption it, and its current value.
+struct MetricDisplay {
+    QString id;
+    QString caption;
+    double value = kNaN;
+    QString suffix;  // e.g. "%" for dose metrics
 };
 
 // ---------------------------------------------------------------------------
@@ -562,12 +573,13 @@ public:
         lay->addWidget(m_max);
     }
 
-    void set(const QString &caption, double v) {
+    void set(const QString &caption, double v, const QString &suffix) {
         m_cap->setText(caption);
-        m_val->setText(fmt(v));
+        m_suffix = suffix;
+        m_val->setText(fmt(v) + (std::isfinite(v) ? suffix : QString()));
         if (std::isfinite(v) && (!std::isfinite(m_maxVal) || v > m_maxVal)) {
             m_maxVal = v;
-            m_max->setText("MAX " + fmt(m_maxVal));
+            m_max->setText("MAX " + fmt(m_maxVal) + suffix);
         }
     }
 
@@ -583,9 +595,93 @@ private:
     }
 
     double m_maxVal = kNaN;
+    QString m_suffix;
     QLabel *m_cap;
     QLabel *m_val;
     ClickableLabel *m_max;
+};
+
+// Compact 10-minute SPL history strip for the breakout window.
+class SparkTile : public QWidget {
+public:
+    static constexpr qint64 SPAN_MS = 10 * 60 * 1000;
+
+    SparkTile() {
+        setAttribute(Qt::WA_StyledBackground, true);
+        setObjectName("metricTile");
+        setStyleSheet("#metricTile { background:#20242e; "
+                      "border:1px solid #2a2f3d; border-radius:6px; }");
+        setMinimumHeight(88);
+    }
+
+    void push(qint64 t, double v) {
+        if (std::isfinite(v))
+            m_pts.push_back({t, v});
+        while (!m_pts.empty() && m_pts.front().t < t - SPAN_MS)
+            m_pts.pop_front();
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter qp(this);
+        QStyleOption opt;
+        opt.initFrom(this);
+        style()->drawPrimitive(QStyle::PE_Widget, &opt, &qp, this);
+
+        QFont f = font();
+        f.setPointSize(8);
+        qp.setFont(f);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(14, 6, width() - 28, 14), Qt::AlignLeft,
+                    "SPL — 10 MIN");
+
+        const int left = 14, right = 14, top = 24, bottom = 10;
+        const int w = width() - left - right;
+        const int h = height() - top - bottom;
+        if (w <= 10 || h <= 10 || m_pts.size() < 2)
+            return;
+        double lo = m_pts.front().v, hi = lo;
+        for (const Pt &p : m_pts) {
+            lo = std::min(lo, p.v);
+            hi = std::max(hi, p.v);
+        }
+        const double mid = (lo + hi) / 2;
+        const double span = std::max(hi - lo, 10.0);  // at least 10 dB tall
+        lo = mid - span / 2 - 2;
+        hi = mid + span / 2 + 2;
+
+        const qint64 now = m_pts.back().t;
+        QPainterPath path;
+        bool started = false;
+        for (const Pt &p : m_pts) {
+            const double x = left + w * (1.0 - double(now - p.t) / SPAN_MS);
+            const double y =
+                top + h * (1.0 - (p.v - lo) / (hi - lo));
+            if (!started) {
+                path.moveTo(x, y);
+                started = true;
+            } else {
+                path.lineTo(x, y);
+            }
+        }
+        qp.setRenderHint(QPainter::Antialiasing);
+        qp.setPen(QPen(theme::barTop, 1.5));
+        qp.drawPath(path);
+
+        qp.setPen(theme::text);
+        qp.drawText(QRect(left, top - 14, w, 14), Qt::AlignRight,
+                    QString::number(hi, 'f', 0));
+        qp.drawText(QRect(left, height() - bottom - 12, w, 12),
+                    Qt::AlignRight, QString::number(lo, 'f', 0));
+    }
+
+private:
+    struct Pt {
+        qint64 t;
+        double v;
+    };
+    std::deque<Pt> m_pts;
 };
 
 class BreakoutWindow : public QWidget {
@@ -599,10 +695,11 @@ public:
         auto *lay = new QVBoxLayout(this);
         lay->setContentsMargins(8, 8, 8, 8);
         lay->setSpacing(6);
-        for (auto *&t : m_tiles) {
-            t = new MetricTile;
-            lay->addWidget(t);
-        }
+        m_tilesBox = new QWidget;
+        m_tilesLay = new QVBoxLayout(m_tilesBox);
+        m_tilesLay->setContentsMargins(0, 0, 0, 0);
+        m_tilesLay->setSpacing(6);
+        lay->addWidget(m_tilesBox);
         m_onTop = new QCheckBox("Always on top");
         QObject::connect(m_onTop, &QCheckBox::toggled, this, [this](bool on) {
             const bool vis = isVisible();
@@ -614,14 +711,39 @@ public:
         lay->addStretch(1);
     }
 
-    void push(const QString &w, double fast, double slow, double leq) {
-        m_tiles[0]->set(QString("L%1F — FAST").arg(w), fast);
-        m_tiles[1]->set(QString("L%1S — SLOW").arg(w), slow);
-        m_tiles[2]->set(QString("L%1eq").arg(w), leq);
+    // Rebuild the tile stack. "spark" is the SPL history sparkline; any
+    // other id becomes a MetricTile fed by update(). Maxima reset.
+    void setTiles(const QStringList &ids) {
+        for (MetricTile *t : m_tiles)
+            delete t;
+        m_tiles.clear();
+        delete m_spark;
+        m_spark = nullptr;
+        for (const QString &id : ids) {
+            if (id == "spark") {
+                m_spark = new SparkTile;
+                m_tilesLay->addWidget(m_spark);
+            } else {
+                auto *t = new MetricTile;
+                m_tiles.insert(id, t);
+                m_tilesLay->addWidget(t);
+            }
+        }
+    }
+
+    void updateMetrics(const std::vector<MetricDisplay> &vals) {
+        for (const MetricDisplay &v : vals)
+            if (MetricTile *t = m_tiles.value(v.id))
+                t->set(v.caption, v.value, v.suffix);
+    }
+
+    void pushSpark(qint64 t, double splDb) {
+        if (m_spark)
+            m_spark->push(t, splDb);
     }
 
     void resetMaxima() {
-        for (auto *t : m_tiles)
+        for (MetricTile *t : m_tiles)
             t->resetMax();
     }
 
@@ -636,6 +758,9 @@ protected:
     }
 
 private:
-    MetricTile *m_tiles[3] = {};
+    QWidget *m_tilesBox;
+    QVBoxLayout *m_tilesLay;
+    QHash<QString, MetricTile *> m_tiles;
+    SparkTile *m_spark = nullptr;
     QCheckBox *m_onTop;
 };

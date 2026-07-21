@@ -18,6 +18,7 @@
 #include <QTextStream>
 
 #include <functional>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMainWindow>
@@ -41,6 +42,7 @@
 #include "api.h"
 #include "audio.h"
 #include "dsp.h"
+#include "metrics.h"
 #include "widgets.h"
 
 #ifndef APP_VERSION
@@ -92,6 +94,37 @@ QMenu::separator { height: 1px; background: #323848; margin: 4px 8px; }
 QStatusBar { color: #8a92a6; }
 QToolTip { background: #232733; color: #c8cede; border: 1px solid #46506a; }
 )";
+
+// Metric registry: ids for config/persistence/API, names for the settings
+// dialog. Captions, values, and suffixes are resolved by MainWindow since
+// they depend on the display weighting and configured Leq windows.
+struct MetricInfo {
+    const char *id;
+    const char *name;
+};
+static const MetricInfo kMetricInfos[] = {
+    {"laf", "Fast (displayed weighting)"},
+    {"las", "Slow (displayed weighting)"},
+    {"leq", "Leq — session"},
+    {"leqS", "LAeq — short window"},
+    {"leqL", "LAeq — long window"},
+    {"lzpk", "Peak (Z, unweighted)"},
+    {"lcpk", "Peak (C-weighted)"},
+    {"ca", "C-A ratio (short window)"},
+    {"l10", "L10 — session"},
+    {"l50", "L50 — session"},
+    {"l90", "L90 — session"},
+    {"doseN", "Dose (NIOSH 85/3)"},
+    {"doseO", "Dose (OSHA 90/5)"},
+};
+
+static QString windowLabel(int secs) {
+    if (secs % 3600 == 0)
+        return QString("%1 h").arg(secs / 3600);
+    if (secs % 60 == 0)
+        return QString("%1 min").arg(secs / 60);
+    return QString("%1 s").arg(secs);
+}
 
 // Parse a measurement-mic calibration file: text lines of "<freq Hz> <dB>"
 // (whitespace separated; REW / miniDSP style). Lines that don't start with
@@ -235,6 +268,104 @@ private:
 
 // ---------------------------------------------------------------------------
 
+class MetricsDialog : public QDialog {
+public:
+    MetricsDialog(QWidget *parent, const QStringList &mainIds,
+                  const QStringList &breakoutIds, int shortS, int longS)
+        : QDialog(parent) {
+        setWindowTitle("Metrics");
+        auto *root = new QVBoxLayout(this);
+
+        auto *grid = new QGridLayout;
+        grid->setHorizontalSpacing(18);
+        grid->addWidget(new QLabel("<b>Metric</b>"), 0, 0);
+        grid->addWidget(new QLabel("<b>Top bar</b>"), 0, 1);
+        grid->addWidget(new QLabel("<b>Breakout</b>"), 0, 2);
+        int row = 1;
+        for (const MetricInfo &mi : kMetricInfos) {
+            grid->addWidget(new QLabel(mi.name), row, 0);
+            auto *cm = new QCheckBox;
+            cm->setChecked(mainIds.contains(mi.id));
+            auto *cb = new QCheckBox;
+            cb->setChecked(breakoutIds.contains(mi.id));
+            grid->addWidget(cm, row, 1, Qt::AlignHCenter);
+            grid->addWidget(cb, row, 2, Qt::AlignHCenter);
+            m_rows.push_back({mi.id, cm, cb});
+            ++row;
+        }
+        grid->addWidget(new QLabel("SPL history sparkline"), row, 0);
+        m_sparkCheck = new QCheckBox;
+        m_sparkCheck->setChecked(breakoutIds.contains("spark"));
+        grid->addWidget(m_sparkCheck, row, 2, Qt::AlignHCenter);
+        root->addLayout(grid);
+
+        auto *form = new QFormLayout;
+        m_shortCombo = new QComboBox;
+        for (int s : {10, 30, 60, 300})
+            m_shortCombo->addItem(windowLabel(s), s);
+        selectData(m_shortCombo, shortS);
+        form->addRow("Short Leq window:", m_shortCombo);
+        m_longCombo = new QComboBox;
+        for (int s : {300, 600, 900, 1800, 3600})
+            m_longCombo->addItem(windowLabel(s), s);
+        selectData(m_longCombo, longS);
+        form->addRow("Long Leq window:", m_longCombo);
+        root->addLayout(form);
+
+        auto *hint = new QLabel(
+            "Session metrics (Leq, L10/L50/L90, dose) reset with the Reset\n"
+            "button. Dose assumes the Cal offset gives true dB SPL.");
+        hint->setStyleSheet("color:#8a92a6; font-size:11px;");
+        root->addWidget(hint);
+
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
+                                             QDialogButtonBox::Cancel);
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        root->addWidget(buttons);
+    }
+
+    QStringList mainIds() const {
+        QStringList out;
+        for (const Row &r : m_rows)
+            if (r.main->isChecked())
+                out << r.id;
+        return out;
+    }
+
+    QStringList breakoutIds() const {
+        QStringList out;
+        for (const Row &r : m_rows)
+            if (r.brk->isChecked())
+                out << r.id;
+        if (m_sparkCheck->isChecked())
+            out << "spark";
+        return out;
+    }
+
+    int shortSecs() const { return m_shortCombo->currentData().toInt(); }
+    int longSecs() const { return m_longCombo->currentData().toInt(); }
+
+private:
+    static void selectData(QComboBox *combo, int value) {
+        const int i = combo->findData(value);
+        if (i >= 0)
+            combo->setCurrentIndex(i);
+    }
+
+    struct Row {
+        QString id;
+        QCheckBox *main;
+        QCheckBox *brk;
+    };
+    std::vector<Row> m_rows;
+    QCheckBox *m_sparkCheck;
+    QComboBox *m_shortCombo;
+    QComboBox *m_longCombo;
+};
+
+// ---------------------------------------------------------------------------
+
 class ApiSettingsDialog : public QDialog {
 public:
     ApiSettingsDialog(QWidget *parent, bool enabled, int port, int rateIdx)
@@ -318,19 +449,13 @@ public:
         ctl->addWidget(resetBtn);
         root->addLayout(ctl);
 
-        // --- SPL readouts ---
-        auto *splRow = new QHBoxLayout;
-        m_rFast = new SplReadout("LAF (Fast)");
-        m_rSlow = new SplReadout("LAS (Slow)");
-        m_rLeq = new SplReadout("LAeq");
-        splRow->addWidget(m_rFast);
-        splRow->addWidget(m_rSlow);
-        splRow->addWidget(m_rLeq);
+        // --- SPL readouts (populated by rebuildReadouts from config) ---
+        m_splRow = new QHBoxLayout;
         m_clipLbl = new QLabel("CLIP");
         setClipStyle(false);
-        splRow->addWidget(m_clipLbl);
-        splRow->addStretch(1);
-        root->addLayout(splRow);
+        m_splRow->addWidget(m_clipLbl);
+        m_splRow->addStretch(1);
+        root->addLayout(m_splRow);
 
         // --- RTA / spectrogram tabs + SPL history strip ---
         m_rta = new RtaWidget;
@@ -463,6 +588,7 @@ public:
         QObject::connect(resetBtn, &QPushButton::clicked, this, [this] {
             m_analyzer.resetLeq();
             m_analyzer.resetPeaks();
+            m_metricsEng.resetSession();
             m_breakout->resetMaxima();
         });
 
@@ -490,8 +616,10 @@ public:
         QObject::connect(timer, &QTimer::timeout, this, [this] { tick(); });
         timer->start();
 
-        changeDevice(m_deviceCombo->currentIndex());
+        // API first: opening the audio device can block on the macOS mic
+        // permission prompt, and the API should come up regardless.
         applyApiState();
+        changeDevice(m_deviceCombo->currentIndex());
     }
 
     ~MainWindow() override { m_engine.stop(); }
@@ -534,6 +662,9 @@ private:
             saveSettings();
         });
         settingsMenu->addSeparator();
+        QAction *metricsAct = settingsMenu->addAction("&Metrics…");
+        connect(metricsAct, &QAction::triggered, this,
+                [this] { showMetricsSettings(); });
         QAction *apiAct = settingsMenu->addAction("&API && Streaming…");
         connect(apiAct, &QAction::triggered, this, [this] { showApiSettings(); });
 
@@ -599,6 +730,91 @@ private:
                                  5000);
         if (interactive)  // during loadSettings() a save would clobber
             saveSettings();  // settings that are not restored yet
+    }
+
+    void showMetricsSettings() {
+        MetricsDialog dlg(this, m_mainMetrics, m_breakoutMetrics, m_leqShortS,
+                          m_leqLongS);
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+        m_mainMetrics = dlg.mainIds();
+        m_breakoutMetrics = dlg.breakoutIds();
+        m_leqShortS = dlg.shortSecs();
+        m_leqLongS = dlg.longSecs();
+        applyMetricsConfig();
+        saveSettings();
+    }
+
+    void applyMetricsConfig() {
+        m_metricsEng.shortWindowS = m_leqShortS;
+        m_metricsEng.longWindowS = m_leqLongS;
+        rebuildReadouts();
+        m_breakout->setTiles(m_breakoutMetrics);
+    }
+
+    void rebuildReadouts() {
+        for (auto &pr : m_readouts) {
+            m_splRow->removeWidget(pr.second);
+            delete pr.second;
+        }
+        m_readouts.clear();
+        int idx = 0;
+        for (const QString &id : m_mainMetrics) {
+            auto *r = new SplReadout(metricCaption(id));
+            m_splRow->insertWidget(idx++, r);
+            m_readouts.push_back({id, r});
+        }
+    }
+
+    QString metricCaption(const QString &id) const {
+        const QString w = m_weightCombo->currentText();
+        if (id == "laf") return QString("L%1F (Fast)").arg(w);
+        if (id == "las") return QString("L%1S (Slow)").arg(w);
+        if (id == "leq") return QString("L%1eq").arg(w);
+        if (id == "leqS") return QString("LAeq %1").arg(windowLabel(m_leqShortS));
+        if (id == "leqL") return QString("LAeq %1").arg(windowLabel(m_leqLongS));
+        if (id == "lzpk") return QString("LZpk");
+        if (id == "lcpk") return QString("LCpk");
+        if (id == "ca") return QString("C-A %1").arg(windowLabel(m_leqShortS));
+        if (id == "l10") return QString("L10");
+        if (id == "l50") return QString("L50");
+        if (id == "l90") return QString("L90");
+        if (id == "doseN") return QString("DOSE NIOSH");
+        if (id == "doseO") return QString("DOSE OSHA");
+        return id;
+    }
+
+    static double metricValue(const QString &id, const MetricValues &v) {
+        if (id == "laf") return v.laf;
+        if (id == "las") return v.las;
+        if (id == "leq") return v.leq;
+        if (id == "leqS") return v.leqShort;
+        if (id == "leqL") return v.leqLong;
+        if (id == "lzpk") return v.lzpk;
+        if (id == "lcpk") return v.lcpk;
+        if (id == "ca") return v.ca;
+        if (id == "l10") return v.l10;
+        if (id == "l50") return v.l50;
+        if (id == "l90") return v.l90;
+        if (id == "doseN") return v.doseNiosh;
+        if (id == "doseO") return v.doseOsha;
+        return kNaN;
+    }
+
+    static QString metricSuffix(const QString &id) {
+        return (id == "doseN" || id == "doseO") ? QString("%") : QString();
+    }
+
+    std::vector<MetricDisplay> buildDisplays(const QStringList &ids,
+                                             const MetricValues &mv) const {
+        std::vector<MetricDisplay> out;
+        for (const QString &id : ids) {
+            if (id == "spark")
+                continue;
+            out.push_back(
+                {id, metricCaption(id), metricValue(id, mv), metricSuffix(id)});
+        }
+        return out;
     }
 
     void showApiSettings() {
@@ -667,6 +883,15 @@ private:
         const QByteArray bgeo = st.value("breakoutGeo").toByteArray();
         if (!bgeo.isEmpty())
             m_breakout->restoreGeometry(bgeo);
+        m_mainMetrics =
+            st.value("metricsMain", QStringList{"laf", "las", "leq"})
+                .toStringList();
+        m_breakoutMetrics =
+            st.value("metricsBreakout", QStringList{"laf", "las", "leq", "spark"})
+                .toStringList();
+        m_leqShortS = st.value("leqShortS", 60).toInt();
+        m_leqLongS = st.value("leqLongS", 900).toInt();
+        applyMetricsConfig();
         if (st.value("breakoutOpen", false).toBool())
             m_breakoutAct->setChecked(true);  // toggled handler shows it
         const QString micPath = st.value("micCorrFile").toString();
@@ -695,6 +920,10 @@ private:
         st.setValue("breakoutOpen", m_breakout->isVisible());
         st.setValue("breakoutOnTop", m_breakout->alwaysOnTop());
         st.setValue("breakoutGeo", m_breakout->saveGeometry());
+        st.setValue("metricsMain", m_mainMetrics);
+        st.setValue("metricsBreakout", m_breakoutMetrics);
+        st.setValue("leqShortS", m_leqShortS);
+        st.setValue("leqLongS", m_leqLongS);
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
         st.setValue("geometry", saveGeometry());
@@ -736,6 +965,7 @@ private:
             m_engine.start(m_devices[row]);
             m_analyzer.sr = m_engine.sampleRate();
             m_analyzer.resetAll();
+            m_metricsEng.resetAll();
             statusBar()->showMessage(
                 QString("Listening at %1 Hz — FFT %2 (%3 ms window)")
                     .arg(m_engine.sampleRate())
@@ -759,6 +989,10 @@ private:
                 m_apiLbl->setStyleSheet("color:#e05c5c;");
                 m_apiLbl->setText(
                     QString("API error: %1").arg(m_api->errorString()));
+                // Also on stderr — the status bar is invisible when run
+                // headless via --api.
+                std::fprintf(stderr, "API error on port %d: %s\n", m_apiPort,
+                             qPrintable(m_api->errorString()));
             }
         } else {
             m_api->close();
@@ -787,8 +1021,8 @@ private:
     }
 
     void tick() {
-        float pk = 0.0f;
-        const bool have = m_engine.latest(FFT_SIZE, m_samples, pk);
+        float pk = 0.0f, pkC = 0.0f;
+        const bool have = m_engine.latest(FFT_SIZE, m_samples, pk, pkC);
         if (pk >= 0.99f)
             m_clipTicks = 20;
         if (m_clipTicks > 0) {
@@ -812,18 +1046,26 @@ private:
         m_lastSlowDbfs = res.slow;
         const double cal = m_calSpin->value();
         const QString w = m_weightCombo->currentText();
-        m_rFast->set(QString("L%1F (Fast)").arg(w), res.fast + cal);
-        m_rSlow->set(QString("L%1S (Slow)").arg(w), res.slow + cal);
-        m_rLeq->set(QString("L%1eq").arg(w), res.leq + cal);
+
+        m_metricsEng.push(res.powA, res.powC, pk, pkC, dt, cal);
+        MetricValues mv = m_metricsEng.values(cal);
+        mv.laf = res.fast + cal;
+        mv.las = res.slow + cal;
+        mv.leq = res.leq + cal;
+        for (auto &pr : m_readouts)
+            pr.second->set(metricCaption(pr.first), metricValue(pr.first, mv),
+                           metricSuffix(pr.first));
+
         for (double &b : res.bands)
             b += cal;
         for (double &p : res.peaks)
             p += cal;
         m_rta->setData(res.bands, res.peaks, cal - 80.0, cal + 20.0, dt);
         m_spectro->pushColumn(m_analyzer.lastPower(), m_analyzer.binWidth());
-        m_breakout->push(w, res.fast + cal, res.slow + cal, res.leq + cal);
+        m_breakout->updateMetrics(buildDisplays(m_breakoutMetrics, mv));
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        m_breakout->pushSpark(now, res.slow + cal);
         m_history->setRange(cal - 80.0, cal + 20.0);
         m_history->push(now, res.fast + cal, res.slow + cal);
 
@@ -838,6 +1080,9 @@ private:
         snap.bands = res.bands;
         snap.peaks = res.peaks;
         snap.micCorr = m_micCorrName;
+        snap.metrics.clear();
+        for (const MetricInfo &mi : kMetricInfos)
+            snap.metrics.push_back({mi.id, metricValue(mi.id, mv)});
         m_api->setSnapshot(snap);
         if (now - m_lastHistPush >= 1000) {
             m_lastHistPush = now;
@@ -854,6 +1099,13 @@ private:
 
     AudioEngine m_engine;
     Analyzer m_analyzer;
+    MetricsEngine m_metricsEng;
+    QStringList m_mainMetrics;
+    QStringList m_breakoutMetrics;
+    int m_leqShortS = 60;
+    int m_leqLongS = 900;
+    QHBoxLayout *m_splRow = nullptr;
+    std::vector<std::pair<QString, SplReadout *>> m_readouts;
     std::vector<float> m_samples;
     QList<QAudioDevice> m_devices;
     QString m_savedDevice;
@@ -879,9 +1131,6 @@ private:
     QDoubleSpinBox *m_calSpin;
     QLabel *m_apiLbl;
     QLabel *m_clipLbl;
-    SplReadout *m_rFast;
-    SplReadout *m_rSlow;
-    SplReadout *m_rLeq;
     RtaWidget *m_rta;
     SpectrogramWidget *m_spectro;
     HistoryWidget *m_history;
@@ -925,6 +1174,24 @@ static int selftest() {
     bool ok = std::fabs(res.fast + 3.01) < 0.2 &&
               THIRD_OCT_CENTERS[kMax] == 1000.0 &&
               std::fabs(res.bands[kMax] + 3.01) < 0.3;
+
+    // Parallel weighted powers: A-weight at 1 kHz is 0 dB, so powA ~ -3.01.
+    std::printf("powA = %7.2f, powC = %7.2f, powZ = %7.2f dBFS "
+                "(expected ~ -3.01 each)\n",
+                toDb(res.powA), toDb(res.powC), toDb(res.powZ));
+    ok = ok && std::fabs(toDb(res.powA) + 3.01) < 0.3 &&
+         std::fabs(toDb(res.powZ) + 3.01) < 0.3;
+
+    // Time-domain C-weighting filter: unity gain at 1 kHz.
+    CWeightFilter cw;
+    cw.design(48000.0);
+    double pkC = 0.0;
+    for (int i = 0; i < 48000; ++i)
+        pkC = std::max(pkC, std::fabs(cw.step(
+                                std::sin(2.0 * kPi * 1000.0 * i / 48000.0))));
+    std::printf("C-weight filter peak @1 kHz sine = %.3f (expected ~1.0)\n",
+                pkC);
+    ok = ok && std::fabs(pkC - 1.0) < 0.05;
 
     // Mic correction: a flat +6 dB response file must LOWER readings by 6 dB.
     an.setMicCorrection({{20.0, 6.0}, {20000.0, 6.0}});
