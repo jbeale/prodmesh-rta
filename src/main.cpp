@@ -487,6 +487,14 @@ public:
         m_deviceCombo = new QComboBox;
         m_deviceCombo->setMinimumWidth(280);
         ctl->addWidget(m_deviceCombo);
+        ctl->addSpacing(6);
+        ctl->addWidget(new QLabel("Ch:"));
+        m_chanCombo = new QComboBox;
+        m_chanCombo->setToolTip(
+            "Which channel of the selected device feeds the analyzer —\n"
+            "e.g. the interface input your measurement mic is plugged into.\n"
+            "Mix averages all channels.");
+        ctl->addWidget(m_chanCombo);
         ctl->addSpacing(12);
         ctl->addWidget(new QLabel("Weighting:"));
         m_weightCombo = new QComboBox;
@@ -605,6 +613,14 @@ public:
         QObject::connect(m_deviceCombo, &QComboBox::currentIndexChanged, this,
                          [this](int row) {
                              changeDevice(row);
+                             saveSettings();
+                         });
+        QObject::connect(m_chanCombo, &QComboBox::currentIndexChanged, this,
+                         [this](int) {
+                             m_inputChannel = m_chanCombo->currentData().toInt();
+                             m_engine.setChannel(m_inputChannel);
+                             m_analyzer.resetAll();
+                             m_metricsEng.resetAll();
                              saveSettings();
                          });
         QObject::connect(m_weightCombo, &QComboBox::currentTextChanged, this,
@@ -1018,6 +1034,7 @@ private:
         m_apiPort = st.value("apiPort", 8517).toInt();
         m_streamRateIdx = st.value("streamRate", 2).toInt();  // default 10 Hz
         m_savedDevice = st.value("device").toString();
+        m_inputChannel = st.value("inputChannel", 0).toInt();
         m_spectroThemeCombo->setCurrentIndex(
             std::clamp(st.value("spectroTheme", 0).toInt(), 0,
                        m_spectroThemeCombo->count() - 1));
@@ -1089,7 +1106,28 @@ private:
         st.setValue("alarmAlert", m_alarmAlert);
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
+        st.setValue("inputChannel", m_inputChannel);
         st.setValue("geometry", saveGeometry());
+    }
+
+    // Rebuild the channel picker for the device that just opened: 1..N plus
+    // Mix, keeping the saved selection when it still exists.
+    void populateChannels() {
+        m_chanCombo->blockSignals(true);
+        m_chanCombo->clear();
+        const int n = std::max(1, m_engine.channelCount());
+        for (int i = 1; i <= n; ++i)
+            m_chanCombo->addItem(QString::number(i), i - 1);
+        m_chanCombo->addItem("Mix", -1);
+        int idx = m_chanCombo->findData(m_inputChannel);
+        if (idx < 0) {  // saved channel doesn't exist on this device
+            idx = 0;
+            m_inputChannel = 0;
+        }
+        m_chanCombo->setCurrentIndex(idx);
+        m_chanCombo->setEnabled(n > 1);
+        m_chanCombo->blockSignals(false);
+        m_engine.setChannel(m_inputChannel);
     }
 
     void setClipStyle(bool lit) {
@@ -1126,12 +1164,14 @@ private:
         }
         try {
             m_engine.start(m_devices[row]);
+            populateChannels();
             m_analyzer.sr = m_engine.sampleRate();
             m_analyzer.resetAll();
             m_metricsEng.resetAll();
             statusBar()->showMessage(
-                QString("Listening at %1 Hz — FFT %2 (%3 ms window)")
+                QString("Listening at %1 Hz, %2 ch — FFT %3 (%4 ms window)")
                     .arg(m_engine.sampleRate())
+                    .arg(m_engine.channelCount())
                     .arg(FFT_SIZE)
                     .arg(double(FFT_SIZE) / m_engine.sampleRate() * 1000.0, 0,
                          'f', 0));
@@ -1241,6 +1281,8 @@ private:
         ApiServer::Snapshot snap;
         snap.timeMs = now;
         snap.samplerate = m_engine.sampleRate();
+        snap.channels = m_engine.channelCount();
+        snap.channel = m_engine.channel();
         snap.weighting = w;
         snap.cal = cal;
         snap.fast = res.fast + cal;
@@ -1302,6 +1344,8 @@ private:
     int m_apiPort = 8517;
     int m_streamRateIdx = 2;  // 10 Hz
     QComboBox *m_deviceCombo;
+    QComboBox *m_chanCombo;
+    int m_inputChannel = 0;  // 0-based; -1 = mix of all channels
     QComboBox *m_weightCombo;
     QComboBox *m_avgCombo;
     QComboBox *m_rtaViewCombo;

@@ -22,9 +22,11 @@ public:
 
     void start(const QAudioDevice &dev) {
         stop();
+        // Capture at the device's native channel count and pick the wanted
+        // channel ourselves — forcing mono here would leave the mixdown (or
+        // the choice of channel) up to the driver.
         QAudioFormat fmt = dev.preferredFormat();
         QAudioFormat want = fmt;
-        want.setChannelCount(1);
         want.setSampleFormat(QAudioFormat::Float);
         if (dev.isFormatSupported(want))
             fmt = want;
@@ -59,6 +61,24 @@ public:
     }
 
     int sampleRate() const { return m_format.sampleRate(); }
+    int channelCount() const { return m_format.channelCount(); }
+
+    // Which capture channel feeds the analyzer: 0-based index, or -1 to
+    // average all channels ("Mix"). Out-of-range indexes fall back to Mix.
+    void setChannel(int ch) {
+        QMutexLocker lock(&m_mutex);
+        if (ch == m_channel)
+            return;
+        m_channel = ch;
+        // New signal source: clear ballistics so old audio doesn't linger.
+        std::fill(m_buf.begin(), m_buf.end(), 0.0f);
+        m_pos = 0;
+        m_total = 0;
+        m_peak = 0.0f;
+        m_peakC = 0.0f;
+        m_cw.reset();
+    }
+    int channel() const { return m_channel; }
 
     // Fills `out` with the most recent n samples. Returns false while the
     // ring buffer is still filling. `peakOut` / `peakCOut` are the raw and
@@ -100,44 +120,49 @@ private:
         const int frames = int(data.size()) / (ch * bps);
         if (frames <= 0)
             return;
+        int sel;
+        {
+            QMutexLocker lock(&m_mutex);
+            sel = (m_channel >= 0 && m_channel < ch) ? m_channel : -1;
+        }
         m_conv.resize(frames);
         const char *p = data.constData();
-        for (int i = 0; i < frames; ++i) {
-            double acc = 0.0;
-            for (int c = 0; c < ch; ++c) {
-                const char *sp = p + (size_t(i) * ch + c) * bps;
-                double v = 0.0;
-                switch (m_format.sampleFormat()) {
-                case QAudioFormat::Float: {
-                    float f;
-                    std::memcpy(&f, sp, 4);
-                    v = f;
-                    break;
-                }
-                case QAudioFormat::Int16: {
-                    qint16 s;
-                    std::memcpy(&s, sp, 2);
-                    v = s / 32768.0;
-                    break;
-                }
-                case QAudioFormat::Int32: {
-                    qint32 s;
-                    std::memcpy(&s, sp, 4);
-                    v = s / 2147483648.0;
-                    break;
-                }
-                case QAudioFormat::UInt8: {
-                    quint8 s;
-                    std::memcpy(&s, sp, 1);
-                    v = (int(s) - 128) / 128.0;
-                    break;
-                }
-                default:
-                    break;
-                }
-                acc += v;
+        auto sample = [&](int i, int c) -> double {
+            const char *sp = p + (size_t(i) * ch + c) * bps;
+            switch (m_format.sampleFormat()) {
+            case QAudioFormat::Float: {
+                float f;
+                std::memcpy(&f, sp, 4);
+                return f;
             }
-            m_conv[i] = float(acc / ch);
+            case QAudioFormat::Int16: {
+                qint16 s;
+                std::memcpy(&s, sp, 2);
+                return s / 32768.0;
+            }
+            case QAudioFormat::Int32: {
+                qint32 s;
+                std::memcpy(&s, sp, 4);
+                return s / 2147483648.0;
+            }
+            case QAudioFormat::UInt8: {
+                quint8 s;
+                std::memcpy(&s, sp, 1);
+                return (int(s) - 128) / 128.0;
+            }
+            default:
+                return 0.0;
+            }
+        };
+        for (int i = 0; i < frames; ++i) {
+            if (sel >= 0) {
+                m_conv[i] = float(sample(i, sel));
+            } else {
+                double acc = 0.0;
+                for (int c = 0; c < ch; ++c)
+                    acc += sample(i, c);
+                m_conv[i] = float(acc / ch);
+            }
         }
         QMutexLocker lock(&m_mutex);
         const int size = int(m_buf.size());
@@ -164,5 +189,6 @@ private:
     qint64 m_total = 0;
     float m_peak = 0.0f;
     float m_peakC = 0.0f;
+    int m_channel = 0;  // 0-based capture channel; -1 = mix of all
     CWeightFilter m_cw;
 };

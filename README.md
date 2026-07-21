@@ -145,6 +145,11 @@ output only appears when redirected:
 - **Input** — pick your microphone. On Windows the same physical mic shows up
   under several host APIs; the **[Windows WASAPI]** entry usually gives the
   native sample rate (48 kHz) and lowest latency.
+- **Ch** (C++ version) — on multi-input interfaces, which channel feeds the
+  analyzer (e.g. the input your measurement mic is on — channel 1 by
+  default). **Mix** averages all channels; note that unused channels then
+  dilute the level (a mic alone on one of 8 inputs reads ~9 dB low per
+  doubling). Reported as `input_channel` in `/api/status`.
 - **Weighting** — A (default, matches most SPL specs), C, or Z (flat).
   Applies to both the SPL readouts and the RTA display; the readout labels
   follow (LAF/LCF/LZF, etc.).

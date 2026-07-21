@@ -41,6 +41,8 @@ public:
     struct Snapshot {
         qint64 timeMs = 0;
         int samplerate = 0;
+        int channels = 0;
+        int channel = 0;  // 0-based capture channel; -1 = mix
         QString weighting = "A";
         double cal = 100.0;
         double fast = kNaN, slow = kNaN, leq = kNaN;  // dB SPL (cal applied)
@@ -336,6 +338,10 @@ private:
             return QJsonDocument(QJsonObject{
                 {"app", "prodmesh-remote-rta"},
                 {"samplerate", m_snap.samplerate},
+                {"input_channels", m_snap.channels},
+                {"input_channel", m_snap.channel < 0
+                                      ? QJsonValue("mix")
+                                      : QJsonValue(m_snap.channel + 1)},
                 {"weighting", m_snap.weighting},
                 {"cal_db", m_snap.cal},
                 {"fft_size", FFT_SIZE},
