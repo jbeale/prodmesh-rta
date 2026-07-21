@@ -22,6 +22,7 @@
 #include <functional>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMediaDevices>
@@ -1427,6 +1428,11 @@ int main(int argc, char *argv[]) {
     app.setApplicationName("ProdMesh Remote RTA");
     app.setOrganizationName("ProdMesh");
     app.setApplicationVersion(APP_VERSION);
+#ifndef Q_OS_MACOS
+    // Windows/Linux taskbar + title bar icon; macOS uses the bundle's
+    // AppIcon.icns (a window icon there would show as a document proxy).
+    app.setWindowIcon(QIcon(":/icon-256.png"));
+#endif
     MainWindow win;
     win.resize(1000, 720);
     win.show();

@@ -19,12 +19,14 @@ done
 QT_PREFIX="$(brew --prefix qt)"
 echo "Using Qt at $QT_PREFIX"
 
-cmake -B build -G Ninja -DCMAKE_PREFIX_PATH="$QT_PREFIX" -DCMAKE_BUILD_TYPE=Release
-
 # Relinking into an already-deployed bundle loads two copies of Qt (the
 # freshly linked binary uses Homebrew paths, the bundle carries its own
 # frameworks) and the app dies at startup — always deploy into a clean bundle.
+# The rm must come BEFORE the configure step: CMake writes the bundle's
+# Info.plist at configure time, and `cmake --build` alone won't recreate it.
 rm -rf build/ProdMeshRemoteRTA.app
+
+cmake -B build -G Ninja -DCMAKE_PREFIX_PATH="$QT_PREFIX" -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
 # Bundle the Qt frameworks into the .app so it runs on any Mac
