@@ -8,6 +8,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
+#include <QStringList>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -124,7 +125,9 @@ private:
 
 // ---------------------------------------------------------------------------
 // Scrolling log-frequency spectrogram. Internal image is COLS x ROWS; each
-// pushed column covers one UPDATE_MS tick, so the view spans ~30 s.
+// pushed column covers one UPDATE_MS tick, so the view spans ~30 s. Raw dB
+// values are kept alongside the image so theme/range changes recolor the
+// whole history, not just new columns.
 
 class SpectrogramWidget : public QWidget {
 public:
@@ -132,17 +135,45 @@ public:
     static constexpr int ROWS = 200;
     static constexpr double OCTAVES = 10.0;  // 20 Hz .. ~20.5 kHz
 
-    SpectrogramWidget() : m_img(COLS, ROWS, QImage::Format_RGB32) {
-        m_img.fill(heatColor(0.0));
+    SpectrogramWidget()
+        : m_img(COLS, ROWS, QImage::Format_RGB32),
+          m_vals(size_t(COLS) * ROWS, kEmpty) {
+        rebuildLut();
+        m_img.fill(m_lut[0]);
         setMinimumHeight(240);
     }
 
-    void pushColumn(const std::vector<double> &power, double df, double cal) {
+    static QStringList themeNames() {
+        return {"ProdMesh", "Green-Red", "Inferno",
+                "Viridis",  "Rainbow",   "Grayscale"};
+    }
+
+    void setTheme(int idx) {
+        m_theme = std::clamp(idx, 0, int(themeNames().size()) - 1);
+        rebuildLut();
+        recolor();
+    }
+
+    // Dynamic range of the color scale, in dB (floor color .. max color).
+    void setRangeDb(double range) {
+        m_range = std::max(10.0, range);
+        recolor();
+    }
+
+    // Positive values shift the scale down so quieter material lights up.
+    void setSensitivityDb(double sens) {
+        m_sens = sens;
+        recolor();
+    }
+
+    void pushColumn(const std::vector<double> &power, double df) {
         if (power.empty() || df <= 0)
             return;
         for (int r = 0; r < ROWS; ++r) {
             QRgb *line = reinterpret_cast<QRgb *>(m_img.scanLine(r));
             std::memmove(line, line + 1, (COLS - 1) * sizeof(QRgb));
+            float *vals = &m_vals[size_t(r) * COLS];
+            std::memmove(vals, vals + 1, (COLS - 1) * sizeof(float));
         }
         const int n = int(power.size());
         for (int r = 0; r < ROWS; ++r) {
@@ -150,11 +181,9 @@ public:
             const double f = 20.0 * std::pow(2.0, frac * OCTAVES);
             int k = int(std::lround(f / df));
             k = std::clamp(k, 0, n - 1);
-            const double db = toDb(power[k]) + cal;
-            const double lo = cal - 80.0;
-            double t = (db - lo) / 100.0;  // color range [cal-80, cal+20]
-            t = std::clamp(t, 0.0, 1.0);
-            reinterpret_cast<QRgb *>(m_img.scanLine(r))[COLS - 1] = heatColor(t);
+            const float v = float(toDb(power[k]));
+            m_vals[size_t(r) * COLS + COLS - 1] = v;
+            reinterpret_cast<QRgb *>(m_img.scanLine(r))[COLS - 1] = colorFor(v);
         }
         update();
     }
@@ -197,33 +226,86 @@ protected:
     }
 
 private:
-    static QRgb heatColor(double t) {
+    static constexpr float kEmpty = -1e9f;
+
+    // Default scale matches the RTA plot: 100 dB of range ending 20 dB above
+    // full scale. Sensitivity slides that window down; range shrinks it.
+    QRgb colorFor(float dbfs) const {
+        const double top = 20.0 - m_sens;
+        const double t = (dbfs - (top - m_range)) / m_range;
+        const int i = int(std::clamp(t, 0.0, 1.0) * 255.0 + 0.5);
+        return m_lut[i];
+    }
+
+    void recolor() {
+        for (int r = 0; r < ROWS; ++r) {
+            QRgb *line = reinterpret_cast<QRgb *>(m_img.scanLine(r));
+            const float *vals = &m_vals[size_t(r) * COLS];
+            for (int c = 0; c < COLS; ++c)
+                line[c] = colorFor(vals[c]);
+        }
+        update();
+    }
+
+    void rebuildLut() {
         struct Stop {
             double t;
             int r, g, b;
         };
-        static const Stop stops[] = {
-            {0.00, 0x10, 0x13, 0x1a}, {0.25, 0x1b, 0x3a, 0x6b},
-            {0.50, 0x1f, 0x9e, 0x89}, {0.75, 0xe8, 0xc8, 0x4b},
-            {1.00, 0xe0, 0x52, 0x3c},
+        static const std::vector<std::vector<Stop>> themes = {
+            // ProdMesh: navy -> blue -> teal -> yellow -> red
+            {{0.00, 0x10, 0x13, 0x1a}, {0.25, 0x1b, 0x3a, 0x6b},
+             {0.50, 0x1f, 0x9e, 0x89}, {0.75, 0xe8, 0xc8, 0x4b},
+             {1.00, 0xe0, 0x52, 0x3c}},
+            // Green-Red: dark -> green -> yellow -> red -> white at max
+            {{0.00, 0x05, 0x12, 0x08}, {0.30, 0x2f, 0xbf, 0x40},
+             {0.55, 0xe8, 0xc8, 0x4b}, {0.80, 0xe0, 0x40, 0x2c},
+             {1.00, 0xff, 0xff, 0xff}},
+            // Inferno (matplotlib, approximated)
+            {{0.00, 0, 0, 4},
+             {0.20, 40, 11, 84},
+             {0.40, 101, 21, 110},
+             {0.60, 187, 55, 84},
+             {0.80, 249, 142, 9},
+             {1.00, 252, 255, 164}},
+            // Viridis (matplotlib, approximated)
+            {{0.00, 68, 1, 84},
+             {0.25, 59, 82, 139},
+             {0.50, 33, 145, 140},
+             {0.75, 94, 201, 98},
+             {1.00, 253, 231, 37}},
+            // Rainbow (jet-style, REW-like)
+            {{0.00, 0, 0, 40},
+             {0.15, 0, 0, 200},
+             {0.40, 0, 220, 220},
+             {0.65, 255, 255, 0},
+             {0.90, 250, 0, 0},
+             {1.00, 130, 0, 0}},
+            // Grayscale
+            {{0.00, 0, 0, 0}, {1.00, 255, 255, 255}},
         };
-        for (int i = 1; i < 5; ++i) {
-            if (t <= stops[i].t) {
-                const double u =
-                    (t - stops[i - 1].t) / (stops[i].t - stops[i - 1].t);
-                const int r =
-                    int(stops[i - 1].r + u * (stops[i].r - stops[i - 1].r));
-                const int g =
-                    int(stops[i - 1].g + u * (stops[i].g - stops[i - 1].g));
-                const int b =
-                    int(stops[i - 1].b + u * (stops[i].b - stops[i - 1].b));
-                return qRgb(r, g, b);
-            }
+        const auto &stops = themes[size_t(m_theme)];
+        for (int i = 0; i < 256; ++i) {
+            const double t = i / 255.0;
+            size_t s = 1;
+            while (s + 1 < stops.size() && t > stops[s].t)
+                ++s;
+            const double u =
+                (t - stops[s - 1].t) / (stops[s].t - stops[s - 1].t);
+            const double uc = std::clamp(u, 0.0, 1.0);
+            m_lut[i] =
+                qRgb(int(stops[s - 1].r + uc * (stops[s].r - stops[s - 1].r)),
+                     int(stops[s - 1].g + uc * (stops[s].g - stops[s - 1].g)),
+                     int(stops[s - 1].b + uc * (stops[s].b - stops[s - 1].b)));
         }
-        return qRgb(stops[4].r, stops[4].g, stops[4].b);
     }
 
     QImage m_img;
+    std::vector<float> m_vals;
+    QRgb m_lut[256];
+    int m_theme = 0;
+    double m_range = 100.0;
+    double m_sens = 0.0;
 };
 
 // ---------------------------------------------------------------------------

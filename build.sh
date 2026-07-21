@@ -20,10 +20,19 @@ QT_PREFIX="$(brew --prefix qt)"
 echo "Using Qt at $QT_PREFIX"
 
 cmake -B build -G Ninja -DCMAKE_PREFIX_PATH="$QT_PREFIX" -DCMAKE_BUILD_TYPE=Release
+
+# Relinking into an already-deployed bundle loads two copies of Qt (the
+# freshly linked binary uses Homebrew paths, the bundle carries its own
+# frameworks) and the app dies at startup — always deploy into a clean bundle.
+rm -rf build/ProdMeshRemoteRTA.app
 cmake --build build
 
 # Bundle the Qt frameworks into the .app so it runs on any Mac
 "$QT_PREFIX/bin/macdeployqt" build/ProdMeshRemoteRTA.app
+
+# macdeployqt rewrites library load paths, which invalidates their code
+# signatures — Apple Silicon kills the app at launch unless we re-sign.
+codesign --force --deep --sign - build/ProdMeshRemoteRTA.app
 
 echo ""
 echo "Build complete: build/ProdMeshRemoteRTA.app"

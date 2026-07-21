@@ -301,9 +301,41 @@ public:
         // --- RTA / spectrogram tabs + SPL history strip ---
         m_rta = new RtaWidget;
         m_spectro = new SpectrogramWidget;
+        auto *spectroPage = new QWidget;
+        auto *spectroLay = new QVBoxLayout(spectroPage);
+        spectroLay->setContentsMargins(0, 4, 0, 0);
+        spectroLay->setSpacing(4);
+        auto *spectroCtl = new QHBoxLayout;
+        spectroCtl->addSpacing(8);
+        spectroCtl->addWidget(new QLabel("Theme:"));
+        m_spectroThemeCombo = new QComboBox;
+        m_spectroThemeCombo->addItems(SpectrogramWidget::themeNames());
+        spectroCtl->addWidget(m_spectroThemeCombo);
+        spectroCtl->addSpacing(12);
+        spectroCtl->addWidget(new QLabel("Range:"));
+        m_spectroRangeCombo = new QComboBox;
+        m_spectroRangeCombo->addItems({"60 dB", "80 dB", "100 dB", "120 dB"});
+        m_spectroRangeCombo->setCurrentIndex(2);
+        m_spectroRangeCombo->setToolTip(
+            "Dynamic range of the color scale — a smaller range gives more "
+            "contrast.");
+        spectroCtl->addWidget(m_spectroRangeCombo);
+        spectroCtl->addSpacing(12);
+        spectroCtl->addWidget(new QLabel("Sensitivity:"));
+        m_spectroSensSpin = new QSpinBox;
+        m_spectroSensSpin->setRange(-20, 40);
+        m_spectroSensSpin->setValue(0);
+        m_spectroSensSpin->setSuffix(" dB");
+        m_spectroSensSpin->setToolTip(
+            "Shifts the color scale: positive values light up quieter "
+            "material.");
+        spectroCtl->addWidget(m_spectroSensSpin);
+        spectroCtl->addStretch(1);
+        spectroLay->addLayout(spectroCtl);
+        spectroLay->addWidget(m_spectro, 1);
         m_tabs = new QTabWidget;
         m_tabs->addTab(m_rta, "RTA");
-        m_tabs->addTab(m_spectro, "Spectrogram");
+        m_tabs->addTab(spectroPage, "Spectrogram");
         m_tabs->setStyleSheet(
             "QTabBar::tab { background:#232733; color:#8a92a6; padding:4px 14px; }"
             "QTabBar::tab:selected { background:#2a2e39; color:#e8ecf4; }");
@@ -340,6 +372,21 @@ public:
                          [this](bool) { saveSettings(); });
         QObject::connect(m_calSpin, &QDoubleSpinBox::valueChanged, this,
                          [this](double) { saveSettings(); });
+        QObject::connect(m_spectroThemeCombo, &QComboBox::currentIndexChanged,
+                         this, [this](int i) {
+                             m_spectro->setTheme(i);
+                             saveSettings();
+                         });
+        QObject::connect(m_spectroRangeCombo, &QComboBox::currentIndexChanged,
+                         this, [this](int i) {
+                             m_spectro->setRangeDb(spectroRange(i));
+                             saveSettings();
+                         });
+        QObject::connect(m_spectroSensSpin, &QSpinBox::valueChanged, this,
+                         [this](int v) {
+                             m_spectro->setSensitivityDb(v);
+                             saveSettings();
+                         });
         QObject::connect(resetBtn, &QPushButton::clicked, this, [this] {
             m_analyzer.resetLeq();
             m_analyzer.resetPeaks();
@@ -516,6 +563,16 @@ private:
         m_apiPort = st.value("apiPort", 8517).toInt();
         m_streamRateIdx = st.value("streamRate", 2).toInt();  // default 10 Hz
         m_savedDevice = st.value("device").toString();
+        m_spectroThemeCombo->setCurrentIndex(
+            std::clamp(st.value("spectroTheme", 0).toInt(), 0,
+                       m_spectroThemeCombo->count() - 1));
+        m_spectroRangeCombo->setCurrentIndex(
+            std::clamp(st.value("spectroRange", 2).toInt(), 0,
+                       m_spectroRangeCombo->count() - 1));
+        m_spectroSensSpin->setValue(st.value("spectroSens", 0).toInt());
+        m_spectro->setTheme(m_spectroThemeCombo->currentIndex());
+        m_spectro->setRangeDb(spectroRange(m_spectroRangeCombo->currentIndex()));
+        m_spectro->setSensitivityDb(m_spectroSensSpin->value());
         const QString micPath = st.value("micCorrFile").toString();
         if (!micPath.isEmpty())
             loadMicCorrection(micPath, false);
@@ -534,6 +591,9 @@ private:
         st.setValue("apiPort", m_apiPort);
         st.setValue("streamRate", m_streamRateIdx);
         st.setValue("micCorrFile", m_micCorrPath);
+        st.setValue("spectroTheme", m_spectroThemeCombo->currentIndex());
+        st.setValue("spectroRange", m_spectroRangeCombo->currentIndex());
+        st.setValue("spectroSens", m_spectroSensSpin->value());
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
         st.setValue("geometry", saveGeometry());
@@ -605,6 +665,11 @@ private:
         }
     }
 
+    static double spectroRange(int idx) {
+        static const double ranges[] = {60.0, 80.0, 100.0, 120.0};
+        return ranges[std::clamp(idx, 0, 3)];
+    }
+
     double rtaTau() const {
         static const double taus[] = {0.0, 0.125, 1.0, 2.0};
         return taus[m_avgCombo->currentIndex()];
@@ -649,8 +714,7 @@ private:
         for (double &p : res.peaks)
             p += cal;
         m_rta->setData(res.bands, res.peaks, cal - 80.0, cal + 20.0);
-        m_spectro->pushColumn(m_analyzer.lastPower(), m_analyzer.binWidth(),
-                              cal);
+        m_spectro->pushColumn(m_analyzer.lastPower(), m_analyzer.binWidth());
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         m_history->setRange(cal - 80.0, cal + 20.0);
@@ -697,6 +761,9 @@ private:
     QComboBox *m_deviceCombo;
     QComboBox *m_weightCombo;
     QComboBox *m_avgCombo;
+    QComboBox *m_spectroThemeCombo;
+    QComboBox *m_spectroRangeCombo;
+    QSpinBox *m_spectroSensSpin;
     QCheckBox *m_peakCheck;
     QDoubleSpinBox *m_calSpin;
     QLabel *m_apiLbl;
