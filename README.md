@@ -38,11 +38,14 @@ The C++ version additionally has:
 - **HTTP + WebSocket API** — JSON endpoints other machines can poll, plus a
   live push stream (see below); configured from **Settings → API & Streaming**
 
-Two equivalent implementations live in this repo:
+Two implementations live in this repo:
 
-- **Python** — `rta.py` (PySide6 + sounddevice + NumPy). Zero build step.
-- **C++** — `src/main.cpp` (pure Qt 6 Widgets + Multimedia, no other
-  dependencies; FFT included). Compiles to a native binary with CMake.
+- **C++** — `src/` (pure Qt 6 Widgets + Multimedia + Network, no other
+  dependencies; FFT included). The full-featured version described above;
+  compiles to a native binary with CMake.
+- **Python** — `rta.py` (PySide6 + sounddevice + NumPy). The original
+  minimal version: SPL meter + RTA only, zero build step. Handy as a
+  readable reference or if you just need a quick meter.
 
 ## Running the Python version
 
@@ -124,7 +127,14 @@ open build/ProdMeshRemoteRTA.app
 
 The app bundle includes the microphone-permission string, so macOS will
 prompt on first launch. `macdeployqt build/ProdMeshRemoteRTA.app` makes it
-portable.
+portable — but note two gotchas `build.sh` handles for you:
+
+- macdeployqt invalidates the code signature while bundling; re-sign with
+  `codesign --force --deep --sign - build/ProdMeshRemoteRTA.app` or Apple
+  Silicon kills the process on launch (`SIGKILL (Code Signature Invalid)`).
+- Never rebuild into an already-deployed bundle — the freshly built binary
+  will load Homebrew's Qt *and* the bundled frameworks and crash on startup.
+  Delete the `.app` before rebuilding (or just use `build.sh`).
 
 `--selftest` runs the same DSP check as the Python version (on Windows the
 output only appears when redirected:
@@ -158,6 +168,35 @@ If you have a Smaart rig calibrated on the same mic/interface/gain, its
 dBFS→SPL offset is conceptually the same number — but verify side-by-side
 once, since different driver paths can shift full-scale by a fixed dB.
 
+### SPL metrics (C++ version)
+
+**Settings → Metrics…** chooses which metrics appear above the graphs and in
+the breakout window. Ids (as used in the CSV log and API):
+
+| Id | Meaning |
+|---|---|
+| `laf` / `las` | Fast (125 ms) / Slow (1 s) level, displayed weighting |
+| `leq` | Leq since the last Reset |
+| `leqS` / `leqL` | rolling LAeq over the short/long window (configurable, 10 s – 1 h) |
+| `lzpk` / `lcpk` | unweighted / C-weighted peak (time-domain C filter) |
+| `ca` | C-A ratio over the short window (low-frequency energy indicator) |
+| `l10` / `l50` / `l90` | level exceeded 10/50/90 % of the session (needs ≥ 10 s) |
+| `doseN` / `doseO` | % of daily noise dose — NIOSH 85 dBA/3 dB and OSHA 90 dBA/5 dB, 80 dBA threshold |
+
+Session statistics (Leq, percentiles, dose) reset with the **Reset** button;
+dose and percentiles assume the Cal offset gives true dB SPL.
+
+### Alarms, logging, and the web dashboard (C++ version)
+
+- **Settings → Alarms…** watches one metric against warning/alert
+  thresholds; its readouts turn yellow/red everywhere (top bar, breakout,
+  dashboard), and the state is served on the API.
+- **File → Start SPL Log…** appends one CSV row per second — ISO timestamp,
+  every metric id above, and the alarm state (0/1/2) — flushed every 10 s.
+- The **web dashboard** is served at the API root URL (shown in the status
+  bar): live readouts, the full metric grid, and RTA bars in any browser on
+  the LAN. Self-contained — no internet access needed.
+
 ### Mic correction files (C++ version)
 
 **Settings → Load Mic Correction…** accepts standard measurement-mic
@@ -180,6 +219,7 @@ asks. All endpoints are read-only GETs returning JSON with
 | Endpoint | Returns |
 |---|---|
 | `/` | live browser dashboard (readouts, metric grid, RTA bars) |
+| `/api` | JSON index of the endpoints below |
 | `/api/status` | sample rate, weighting, cal, uptime, history length |
 | `/api/spl` | current `fast_db`, `slow_db`, `leq_db` + `metrics` + `alarm` |
 | `/api/rta` | `centers_hz` + `bands_db` (31 values) + `peaks_db` + `metrics` |
@@ -258,5 +298,7 @@ build without revisiting LGPL compliance.
 - Below ~50 Hz the 1/3-octave bands are narrower than the FFT resolution at
   44.1/48 kHz; those bands are estimated from spectral density and are
   correspondingly coarser.
-- A quick DSP sanity check is built in: `python rta.py --selftest` verifies a
-  full-scale 1 kHz sine reads −3.01 dBFS in the 1 kHz band.
+- A DSP sanity check is built in: `--selftest` (both versions) verifies a
+  full-scale 1 kHz sine reads −3.01 dBFS in the 1 kHz band. The C++ version
+  additionally checks the hi-res spectrum peak, the A/C/Z broadband powers,
+  the time-domain C-weighting filter's 1 kHz gain, and mic-correction math.
