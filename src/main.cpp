@@ -49,6 +49,50 @@
 
 static const char *APP_NAME = "ProdMesh Remote RTA";
 
+// Application-wide dark theme (on the Fusion style) — one place instead of
+// scattered per-widget stylesheets so dialogs and menus stay consistent.
+static const char *APP_STYLE = R"(
+QWidget { background: #1a1d24; color: #c8cede; }
+QLabel, QCheckBox { background: transparent; }
+/* QComboBox / QSpinBox boxes are deliberately unstyled: any QSS box rule
+   stops Fusion from drawing its (crisp, palette-aware) arrow glyphs. Their
+   colors come from the QPalette set in main(). */
+QComboBox QAbstractItemView {
+    background: #232733; border: 1px solid #46506a;
+    selection-background-color: #2a2e39; selection-color: #e8ecf4; outline: 0;
+}
+QPushButton {
+    background: #2a2f3d; border: 1px solid #323848; border-radius: 4px;
+    padding: 4px 14px;
+}
+QPushButton:hover { background: #323848; border-color: #46506a; }
+QPushButton:pressed { background: #232733; }
+QPushButton:disabled { color: #5a6172; }
+QCheckBox::indicator {
+    width: 14px; height: 14px; border: 1px solid #46506a;
+    border-radius: 3px; background: #232733;
+}
+QCheckBox::indicator:hover { border-color: #2fbf9b; }
+QCheckBox::indicator:checked { background: #2fbf9b; border-color: #2fbf9b; }
+QTabWidget::pane { border: 1px solid #2a2e39; }
+QTabBar::tab {
+    background: #20242e; color: #8a92a6; padding: 5px 16px;
+    border: 1px solid #2a2e39; border-bottom: none;
+    border-top-left-radius: 4px; border-top-right-radius: 4px;
+}
+QTabBar::tab:selected { background: #2a2e39; color: #e8ecf4; }
+QTabBar::tab:hover:!selected { color: #c8cede; }
+QMenuBar { background: #1a1d24; }
+QMenuBar::item { background: transparent; padding: 4px 10px; }
+QMenuBar::item:selected { background: #2a2e39; border-radius: 4px; }
+QMenu { background: #232733; border: 1px solid #46506a; }
+QMenu::item { background: transparent; padding: 4px 24px; }
+QMenu::item:selected { background: #2a2e39; }
+QMenu::separator { height: 1px; background: #323848; margin: 4px 8px; }
+QStatusBar { color: #8a92a6; }
+QToolTip { background: #232733; color: #c8cede; border: 1px solid #46506a; }
+)";
+
 // Parse a measurement-mic calibration file: text lines of "<freq Hz> <dB>"
 // (whitespace separated; REW / miniDSP style). Lines that don't start with
 // two numbers (comments, "Sens Factor" headers, quotes) are skipped.
@@ -242,7 +286,6 @@ public:
 
         auto *central = new QWidget;
         setCentralWidget(central);
-        central->setStyleSheet("background:#1a1d24; color:#c8cede;");
         auto *root = new QVBoxLayout(central);
 
         buildMenus();
@@ -258,15 +301,6 @@ public:
         m_weightCombo = new QComboBox;
         m_weightCombo->addItems({"A", "C", "Z"});
         ctl->addWidget(m_weightCombo);
-        ctl->addSpacing(12);
-        ctl->addWidget(new QLabel("RTA avg:"));
-        m_avgCombo = new QComboBox;
-        m_avgCombo->addItems({"Off", "Fast (125 ms)", "Slow (1 s)", "2 s"});
-        m_avgCombo->setCurrentIndex(1);
-        ctl->addWidget(m_avgCombo);
-        ctl->addSpacing(12);
-        m_peakCheck = new QCheckBox("Peak hold");
-        ctl->addWidget(m_peakCheck);
         ctl->addSpacing(12);
         ctl->addWidget(new QLabel("Cal:"));
         m_calSpin = new QDoubleSpinBox;
@@ -300,6 +334,36 @@ public:
 
         // --- RTA / spectrogram tabs + SPL history strip ---
         m_rta = new RtaWidget;
+        auto *rtaPage = new QWidget;
+        auto *rtaLay = new QVBoxLayout(rtaPage);
+        rtaLay->setContentsMargins(0, 4, 0, 0);
+        rtaLay->setSpacing(4);
+        auto *rtaCtl = new QHBoxLayout;
+        rtaCtl->addSpacing(8);
+        rtaCtl->addWidget(new QLabel("View:"));
+        m_rtaViewCombo = new QComboBox;
+        m_rtaViewCombo->addItems({"Bars", "Line"});
+        rtaCtl->addWidget(m_rtaViewCombo);
+        rtaCtl->addSpacing(12);
+        rtaCtl->addWidget(new QLabel("Avg:"));
+        m_avgCombo = new QComboBox;
+        m_avgCombo->addItems({"Off", "Fast (125 ms)", "Slow (1 s)", "2 s"});
+        m_avgCombo->setCurrentIndex(1);
+        rtaCtl->addWidget(m_avgCombo);
+        rtaCtl->addSpacing(12);
+        rtaCtl->addWidget(new QLabel("Decay:"));
+        m_rtaDecayCombo = new QComboBox;
+        m_rtaDecayCombo->addItems(
+            {"Off", "Slow (6 dB/s)", "Medium (12 dB/s)", "Fast (24 dB/s)"});
+        m_rtaDecayCombo->setToolTip(
+            "Bands rise instantly and fall at this rate.");
+        rtaCtl->addWidget(m_rtaDecayCombo);
+        rtaCtl->addSpacing(12);
+        m_peakCheck = new QCheckBox("Peak hold");
+        rtaCtl->addWidget(m_peakCheck);
+        rtaCtl->addStretch(1);
+        rtaLay->addLayout(rtaCtl);
+        rtaLay->addWidget(m_rta, 1);
         m_spectro = new SpectrogramWidget;
         auto *spectroPage = new QWidget;
         auto *spectroLay = new QVBoxLayout(spectroPage);
@@ -334,21 +398,20 @@ public:
         spectroLay->addLayout(spectroCtl);
         spectroLay->addWidget(m_spectro, 1);
         m_tabs = new QTabWidget;
-        m_tabs->addTab(m_rta, "RTA");
+        m_tabs->addTab(rtaPage, "RTA");
         m_tabs->addTab(spectroPage, "Spectrogram");
-        m_tabs->setStyleSheet(
-            "QTabBar::tab { background:#232733; color:#8a92a6; padding:4px 14px; }"
-            "QTabBar::tab:selected { background:#2a2e39; color:#e8ecf4; }");
         root->addWidget(m_tabs, 1);
         m_history = new HistoryWidget;
         root->addWidget(m_history);
 
-        statusBar()->setStyleSheet("color:#8a92a6;");
         m_apiLbl = new QLabel;
         m_apiLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
         statusBar()->addPermanentWidget(m_apiLbl);
 
         m_api = new ApiServer(this);
+
+        m_breakout = new BreakoutWindow(this);
+        m_breakout->onClosed = [this] { m_breakoutAct->setChecked(false); };
 
         loadSettings();
 
@@ -372,6 +435,16 @@ public:
                          [this](bool) { saveSettings(); });
         QObject::connect(m_calSpin, &QDoubleSpinBox::valueChanged, this,
                          [this](double) { saveSettings(); });
+        QObject::connect(m_rtaViewCombo, &QComboBox::currentIndexChanged, this,
+                         [this](int i) {
+                             m_rta->setViewMode(i);
+                             saveSettings();
+                         });
+        QObject::connect(m_rtaDecayCombo, &QComboBox::currentIndexChanged, this,
+                         [this](int i) {
+                             m_rta->setDecayRate(rtaDecayRate(i));
+                             saveSettings();
+                         });
         QObject::connect(m_spectroThemeCombo, &QComboBox::currentIndexChanged,
                          this, [this](int i) {
                              m_spectro->setTheme(i);
@@ -390,6 +463,7 @@ public:
         QObject::connect(resetBtn, &QPushButton::clicked, this, [this] {
             m_analyzer.resetLeq();
             m_analyzer.resetPeaks();
+            m_breakout->resetMaxima();
         });
 
         // --api [port] command-line override (handy for headless testing)
@@ -431,12 +505,6 @@ protected:
 
 private:
     void buildMenus() {
-        menuBar()->setStyleSheet(
-            "QMenuBar { background:#1a1d24; color:#c8cede; }"
-            "QMenuBar::item:selected { background:#2a2e39; }"
-            "QMenu { background:#232733; color:#c8cede; }"
-            "QMenu::item:selected { background:#2a2e39; }");
-
         QMenu *fileMenu = menuBar()->addMenu("&File");
         QAction *quitAct = fileMenu->addAction("&Quit");
         quitAct->setShortcut(QKeySequence::Quit);
@@ -468,6 +536,22 @@ private:
         settingsMenu->addSeparator();
         QAction *apiAct = settingsMenu->addAction("&API && Streaming…");
         connect(apiAct, &QAction::triggered, this, [this] { showApiSettings(); });
+
+        QMenu *viewMenu = menuBar()->addMenu("&View");
+        m_breakoutAct = viewMenu->addAction("&Metric Breakout");
+        m_breakoutAct->setCheckable(true);
+        // Not Ctrl+M: on macOS that maps to Cmd+M, the system Minimize.
+        m_breakoutAct->setShortcut(QKeySequence("Ctrl+B"));
+        connect(m_breakoutAct, &QAction::toggled, this, [this](bool on) {
+            if (on) {
+                m_breakout->show();
+                m_breakout->raise();
+                m_breakout->activateWindow();
+            } else {
+                m_breakout->hide();
+            }
+            saveSettings();
+        });
 
         QMenu *helpMenu = menuBar()->addMenu("&Help");
         QAction *aboutAct =
@@ -573,6 +657,18 @@ private:
         m_spectro->setTheme(m_spectroThemeCombo->currentIndex());
         m_spectro->setRangeDb(spectroRange(m_spectroRangeCombo->currentIndex()));
         m_spectro->setSensitivityDb(m_spectroSensSpin->value());
+        m_rtaViewCombo->setCurrentIndex(
+            std::clamp(st.value("rtaView", 0).toInt(), 0, 1));
+        m_rtaDecayCombo->setCurrentIndex(
+            std::clamp(st.value("rtaDecay", 0).toInt(), 0, 3));
+        m_rta->setViewMode(m_rtaViewCombo->currentIndex());
+        m_rta->setDecayRate(rtaDecayRate(m_rtaDecayCombo->currentIndex()));
+        m_breakout->setAlwaysOnTop(st.value("breakoutOnTop", false).toBool());
+        const QByteArray bgeo = st.value("breakoutGeo").toByteArray();
+        if (!bgeo.isEmpty())
+            m_breakout->restoreGeometry(bgeo);
+        if (st.value("breakoutOpen", false).toBool())
+            m_breakoutAct->setChecked(true);  // toggled handler shows it
         const QString micPath = st.value("micCorrFile").toString();
         if (!micPath.isEmpty())
             loadMicCorrection(micPath, false);
@@ -594,6 +690,11 @@ private:
         st.setValue("spectroTheme", m_spectroThemeCombo->currentIndex());
         st.setValue("spectroRange", m_spectroRangeCombo->currentIndex());
         st.setValue("spectroSens", m_spectroSensSpin->value());
+        st.setValue("rtaView", m_rtaViewCombo->currentIndex());
+        st.setValue("rtaDecay", m_rtaDecayCombo->currentIndex());
+        st.setValue("breakoutOpen", m_breakout->isVisible());
+        st.setValue("breakoutOnTop", m_breakout->alwaysOnTop());
+        st.setValue("breakoutGeo", m_breakout->saveGeometry());
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
         st.setValue("geometry", saveGeometry());
@@ -670,6 +771,11 @@ private:
         return ranges[std::clamp(idx, 0, 3)];
     }
 
+    static double rtaDecayRate(int idx) {
+        static const double rates[] = {0.0, 6.0, 12.0, 24.0};
+        return rates[std::clamp(idx, 0, 3)];
+    }
+
     double rtaTau() const {
         static const double taus[] = {0.0, 0.125, 1.0, 2.0};
         return taus[m_avgCombo->currentIndex()];
@@ -713,8 +819,9 @@ private:
             b += cal;
         for (double &p : res.peaks)
             p += cal;
-        m_rta->setData(res.bands, res.peaks, cal - 80.0, cal + 20.0);
+        m_rta->setData(res.bands, res.peaks, cal - 80.0, cal + 20.0, dt);
         m_spectro->pushColumn(m_analyzer.lastPower(), m_analyzer.binWidth());
+        m_breakout->push(w, res.fast + cal, res.slow + cal, res.leq + cal);
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         m_history->setRange(cal - 80.0, cal + 20.0);
@@ -761,9 +868,13 @@ private:
     QComboBox *m_deviceCombo;
     QComboBox *m_weightCombo;
     QComboBox *m_avgCombo;
+    QComboBox *m_rtaViewCombo;
+    QComboBox *m_rtaDecayCombo;
     QComboBox *m_spectroThemeCombo;
     QComboBox *m_spectroRangeCombo;
     QSpinBox *m_spectroSensSpin;
+    BreakoutWindow *m_breakout = nullptr;
+    QAction *m_breakoutAct = nullptr;
     QCheckBox *m_peakCheck;
     QDoubleSpinBox *m_calSpin;
     QLabel *m_apiLbl;
@@ -833,6 +944,24 @@ int main(int argc, char *argv[]) {
         if (std::strcmp(argv[i], "--selftest") == 0)
             return selftest();
     QApplication app(argc, argv);
+    QApplication::setStyle("Fusion");
+    QPalette pal;
+    pal.setColor(QPalette::Window, QColor("#1a1d24"));
+    pal.setColor(QPalette::WindowText, QColor("#c8cede"));
+    pal.setColor(QPalette::Base, QColor("#232733"));
+    pal.setColor(QPalette::AlternateBase, QColor("#20242e"));
+    pal.setColor(QPalette::Text, QColor("#c8cede"));
+    pal.setColor(QPalette::Button, QColor("#2a2f3d"));
+    pal.setColor(QPalette::ButtonText, QColor("#c8cede"));
+    pal.setColor(QPalette::ToolTipBase, QColor("#232733"));
+    pal.setColor(QPalette::ToolTipText, QColor("#c8cede"));
+    pal.setColor(QPalette::Highlight, QColor("#2fbf9b"));
+    pal.setColor(QPalette::HighlightedText, QColor("#10131a"));
+    pal.setColor(QPalette::PlaceholderText, QColor("#5a6172"));
+    pal.setColor(QPalette::Disabled, QPalette::Text, QColor("#5a6172"));
+    pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#5a6172"));
+    app.setPalette(pal);
+    app.setStyleSheet(APP_STYLE);
     app.setApplicationName("ProdMesh Remote RTA");
     app.setOrganizationName("ProdMesh");
     app.setApplicationVersion(APP_VERSION);

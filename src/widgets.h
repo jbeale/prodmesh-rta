@@ -1,10 +1,13 @@
 // Display widgets: RTA bars, spectrogram, SPL history strip, big readouts.
 #pragma once
 
+#include <QCheckBox>
+#include <QCloseEvent>
 #include <QColor>
 #include <QFont>
 #include <QImage>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
@@ -14,6 +17,7 @@
 
 #include <cstring>
 #include <deque>
+#include <functional>
 
 #include "dsp.h"
 
@@ -47,9 +51,31 @@ class RtaWidget : public QWidget {
 public:
     RtaWidget() { setMinimumHeight(240); }
 
+    void setViewMode(int mode) {  // 0 = bars, 1 = line
+        m_mode = mode;
+        update();
+    }
+
+    // Display fall rate in dB/s; bands rise instantly and decay at this
+    // rate once the level drops. 0 disables (display follows the data).
+    void setDecayRate(double dbPerSec) { m_decay = dbPerSec; }
+
     void setData(const std::vector<double> &bands,
-                 const std::vector<double> &peaks, double yMin, double yMax) {
-        m_bands = bands;
+                 const std::vector<double> &peaks, double yMin, double yMax,
+                 double dt) {
+        if (m_decay <= 0.0 || m_disp.size() != bands.size()) {
+            m_disp = bands;
+        } else {
+            for (size_t i = 0; i < bands.size(); ++i) {
+                const double fallen = m_disp[i] - m_decay * dt;
+                if (!std::isfinite(fallen))
+                    m_disp[i] = bands[i];
+                else if (std::isfinite(bands[i]))
+                    m_disp[i] = std::max(bands[i], fallen);
+                else
+                    m_disp[i] = fallen;
+            }
+        }
         m_peaks = peaks;
         m_yMin = yMin;
         m_yMax = yMax;
@@ -87,7 +113,6 @@ protected:
         const double slot = double(w) / NUM_BANDS;
         const double barW = std::max(2.0, slot - 2.0);
         for (int i = 0; i < NUM_BANDS; ++i) {
-            const double x0 = left + i * slot + (slot - barW) / 2;
             const QString lbl = xAxisLabel(THIRD_OCT_CENTERS[i]);
             if (!lbl.isEmpty()) {
                 qp.setPen(theme::text);
@@ -95,21 +120,65 @@ protected:
                                   height() - bottom + 4, int(slot * 3), 16),
                             Qt::AlignHCenter, lbl);
             }
-            if (i >= int(m_bands.size()) || !std::isfinite(m_bands[i]))
-                continue;
-            const double v = std::clamp(m_bands[i], m_yMin, m_yMax);
-            const int y = int(yOf(v));
-            qp.setPen(Qt::NoPen);
-            qp.setBrush(theme::bar);
-            qp.drawRect(int(x0), y, int(barW), top + h - y);
-            qp.setBrush(theme::barTop);
-            qp.drawRect(int(x0), y, int(barW), 2);
-            if (i < int(m_peaks.size()) && std::isfinite(m_peaks[i])) {
-                const double pv = std::clamp(m_peaks[i], m_yMin, m_yMax);
-                const int py = int(yOf(pv));
-                qp.setPen(QPen(theme::peak, 2));
-                qp.drawLine(int(x0), py, int(x0 + barW), py);
+        }
+
+        if (m_mode == 1) {
+            QPainterPath line;
+            double firstX = 0, lastX = 0;
+            bool started = false;
+            for (int i = 0; i < NUM_BANDS && i < int(m_disp.size()); ++i) {
+                if (!std::isfinite(m_disp[i]))
+                    continue;
+                const double x = left + (i + 0.5) * slot;
+                const double v = std::clamp(m_disp[i], m_yMin, m_yMax);
+                if (!started) {
+                    line.moveTo(x, yOf(v));
+                    firstX = x;
+                    started = true;
+                } else {
+                    line.lineTo(x, yOf(v));
+                }
+                lastX = x;
             }
+            if (started) {
+                QPainterPath fill = line;
+                fill.lineTo(lastX, top + h);
+                fill.lineTo(firstX, top + h);
+                fill.closeSubpath();
+                QColor fc = theme::bar;
+                fc.setAlpha(60);
+                qp.setRenderHint(QPainter::Antialiasing);
+                qp.setPen(Qt::NoPen);
+                qp.setBrush(fc);
+                qp.drawPath(fill);
+                qp.setPen(QPen(theme::barTop, 2));
+                qp.setBrush(Qt::NoBrush);
+                qp.drawPath(line);
+                qp.setRenderHint(QPainter::Antialiasing, false);
+            }
+        } else {
+            for (int i = 0; i < NUM_BANDS && i < int(m_disp.size()); ++i) {
+                if (!std::isfinite(m_disp[i]))
+                    continue;
+                const double x0 = left + i * slot + (slot - barW) / 2;
+                const double v = std::clamp(m_disp[i], m_yMin, m_yMax);
+                const int y = int(yOf(v));
+                qp.setPen(Qt::NoPen);
+                qp.setBrush(theme::bar);
+                qp.drawRect(int(x0), y, int(barW), top + h - y);
+                qp.setBrush(theme::barTop);
+                qp.drawRect(int(x0), y, int(barW), 2);
+            }
+        }
+
+        for (int i = 0; i < NUM_BANDS && i < int(m_peaks.size()); ++i) {
+            if (!std::isfinite(m_peaks[i]))
+                continue;
+            const double x0 = left + i * slot + (slot - barW) / 2;
+            const double pv = std::clamp(m_peaks[i], m_yMin, m_yMax);
+            const int py = int(yOf(pv));
+            qp.setPen(QPen(theme::peak, 2));
+            qp.drawLine(int(x0), py, int(x0 + barW), py);
         }
 
         qp.setPen(QPen(theme::grid, 1));
@@ -118,9 +187,11 @@ protected:
     }
 
 private:
-    std::vector<double> m_bands;
+    std::vector<double> m_disp;
     std::vector<double> m_peaks;
     double m_yMin = 20.0, m_yMax = 120.0;
+    int m_mode = 0;
+    double m_decay = 0.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -442,4 +513,129 @@ public:
 private:
     QLabel *m_cap;
     QLabel *m_val;
+};
+
+// ---------------------------------------------------------------------------
+// Metric breakout: a narrow vertical window of readouts meant to sit next
+// to another app (e.g. Waves SuperRack). Each metric records its maximum;
+// clicking the MAX line resets it.
+
+class ClickableLabel : public QLabel {
+public:
+    using QLabel::QLabel;
+    std::function<void()> onClick;
+
+protected:
+    void mousePressEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && onClick)
+            onClick();
+        QLabel::mousePressEvent(e);
+    }
+};
+
+class MetricTile : public QWidget {
+public:
+    MetricTile() {
+        setAttribute(Qt::WA_StyledBackground, true);
+        setObjectName("metricTile");
+        setStyleSheet("#metricTile { background:#20242e; "
+                      "border:1px solid #2a2f3d; border-radius:6px; }");
+        auto *lay = new QVBoxLayout(this);
+        lay->setContentsMargins(14, 8, 14, 10);
+        lay->setSpacing(0);
+        m_cap = new QLabel;
+        m_cap->setStyleSheet("color:#8a92a6; font-size:11px;");
+        m_val = new QLabel("--.-");
+        QFont f;
+        f.setFamilies({"Consolas", "Menlo", "Courier New"});
+        f.setPointSize(32);
+        f.setBold(true);
+        m_val->setFont(f);
+        m_val->setStyleSheet("color:#e8ecf4;");
+        m_max = new ClickableLabel("MAX --.-");
+        m_max->setStyleSheet("color:#e0c05c; font-size:12px;");
+        m_max->setCursor(Qt::PointingHandCursor);
+        m_max->setToolTip("Highest value since last reset — click to reset");
+        m_max->onClick = [this] { resetMax(); };
+        lay->addWidget(m_cap);
+        lay->addWidget(m_val);
+        lay->addWidget(m_max);
+    }
+
+    void set(const QString &caption, double v) {
+        m_cap->setText(caption);
+        m_val->setText(fmt(v));
+        if (std::isfinite(v) && (!std::isfinite(m_maxVal) || v > m_maxVal)) {
+            m_maxVal = v;
+            m_max->setText("MAX " + fmt(m_maxVal));
+        }
+    }
+
+    void resetMax() {
+        m_maxVal = kNaN;
+        m_max->setText("MAX --.-");
+    }
+
+private:
+    static QString fmt(double v) {
+        return std::isfinite(v) ? QString::number(v, 'f', 1)
+                                : QString("--.-");
+    }
+
+    double m_maxVal = kNaN;
+    QLabel *m_cap;
+    QLabel *m_val;
+    ClickableLabel *m_max;
+};
+
+class BreakoutWindow : public QWidget {
+public:
+    std::function<void()> onClosed;
+
+    explicit BreakoutWindow(QWidget *parent) : QWidget(parent, Qt::Window) {
+        setAttribute(Qt::WA_StyledBackground, true);
+        setWindowTitle("Metrics");
+        setMinimumWidth(190);
+        auto *lay = new QVBoxLayout(this);
+        lay->setContentsMargins(8, 8, 8, 8);
+        lay->setSpacing(6);
+        for (auto *&t : m_tiles) {
+            t = new MetricTile;
+            lay->addWidget(t);
+        }
+        m_onTop = new QCheckBox("Always on top");
+        QObject::connect(m_onTop, &QCheckBox::toggled, this, [this](bool on) {
+            const bool vis = isVisible();
+            setWindowFlag(Qt::WindowStaysOnTopHint, on);
+            if (vis)
+                show();  // changing flags hides the window
+        });
+        lay->addWidget(m_onTop);
+        lay->addStretch(1);
+    }
+
+    void push(const QString &w, double fast, double slow, double leq) {
+        m_tiles[0]->set(QString("L%1F — FAST").arg(w), fast);
+        m_tiles[1]->set(QString("L%1S — SLOW").arg(w), slow);
+        m_tiles[2]->set(QString("L%1eq").arg(w), leq);
+    }
+
+    void resetMaxima() {
+        for (auto *t : m_tiles)
+            t->resetMax();
+    }
+
+    bool alwaysOnTop() const { return m_onTop->isChecked(); }
+    void setAlwaysOnTop(bool on) { m_onTop->setChecked(on); }
+
+protected:
+    void closeEvent(QCloseEvent *e) override {
+        if (onClosed)
+            onClosed();
+        QWidget::closeEvent(e);
+    }
+
+private:
+    MetricTile *m_tiles[3] = {};
+    QCheckBox *m_onTop;
 };
