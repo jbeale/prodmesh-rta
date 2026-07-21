@@ -76,6 +76,20 @@ python -m venv .venv
 .venv/bin/python rta.py                        # Windows: .venv\Scripts\python
 ```
 
+## Downloads / releases
+
+Prebuilt zips for Windows and macOS are on the
+[Releases page](https://github.com/jbeale/prodmesh-rta/releases) — each
+release includes install notes for the unsigned-binary prompts. To cut a
+release (maintainers): bump `VERSION` in `CMakeLists.txt`, commit, then
+
+```bash
+git tag v0.4.0 && git push origin v0.4.0
+```
+
+The `release` workflow builds both platforms, runs the selftest, and
+publishes the release automatically. Ordinary pushes never create releases.
+
 ## Building the C++ version
 
 ### The easy way

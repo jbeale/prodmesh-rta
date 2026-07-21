@@ -83,6 +83,10 @@ jobs:
       - name: Package (macdeployqt)
         run: |
           macdeployqt build/ProdMeshRemoteRTA.app
+          # macdeployqt rewrites load paths and invalidates the signatures —
+          # without an ad-hoc re-sign the downloaded app is SIGKILLed on
+          # Apple Silicon (Code Signature Invalid)
+          codesign --force --deep --sign - build/ProdMeshRemoteRTA.app
           # ditto preserves the symlinks/permissions inside the bundle;
           # upload-artifact alone would flatten them
           ditto -c -k --keepParent build/ProdMeshRemoteRTA.app ProdMeshRemoteRTA-macos.zip

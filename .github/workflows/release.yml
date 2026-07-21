@@ -1,0 +1,124 @@
+name: release
+
+# Fires only when a version tag is pushed (git tag vX.Y.Z && git push origin
+# vX.Y.Z) — never on ordinary commits. Builds both platforms, runs the
+# selftest, and publishes a GitHub Release with the zips attached.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          # Same pins as build.yml: 6.8 is the proven-green Windows combo
+          version: '6.8.*'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Selftest
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem -Recurse build -Filter ProdMeshRemoteRTA.exe | Select-Object -First 1).FullName
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest" -RedirectStandardOutput selftest.txt -Wait -PassThru -NoNewWindow
+          Get-Content selftest.txt
+          exit $p.ExitCode
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist\ProdMeshRemoteRTA | Out-Null
+          $exe = (Get-ChildItem -Recurse build -Filter ProdMeshRemoteRTA.exe | Select-Object -First 1).FullName
+          Copy-Item $exe dist\ProdMeshRemoteRTA\
+          windeployqt --release dist\ProdMeshRemoteRTA\ProdMeshRemoteRTA.exe
+          Compress-Archive -Path dist\ProdMeshRemoteRTA -DestinationPath "ProdMeshRemoteRTA-$env:GITHUB_REF_NAME-windows-x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: ProdMeshRemoteRTA-*-windows-x64.zip
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches CMake version
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V%%-*}"
+          grep -q "VERSION $V " CMakeLists.txt || {
+            echo "::error::Tag $GITHUB_REF_NAME does not match the VERSION in CMakeLists.txt — bump it in the release commit."
+            exit 1
+          }
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.*'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Selftest
+        run: ./build/ProdMeshRemoteRTA.app/Contents/MacOS/ProdMeshRemoteRTA --selftest
+
+      - name: Package (macdeployqt + ad-hoc sign)
+        run: |
+          macdeployqt build/ProdMeshRemoteRTA.app
+          # macdeployqt rewrites load paths and invalidates the signatures;
+          # unsigned bundles are SIGKILLed on Apple Silicon. Ad-hoc re-sign
+          # (swap for Developer ID + notarization when we have the cert).
+          codesign --force --deep --sign - build/ProdMeshRemoteRTA.app
+          ditto -c -k --keepParent build/ProdMeshRemoteRTA.app "ProdMeshRemoteRTA-$GITHUB_REF_NAME-macos.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: ProdMeshRemoteRTA-*-macos.zip
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            ProdMeshRemoteRTA-*-windows-x64.zip
+            ProdMeshRemoteRTA-*-macos.zip
+          body: |
+            ## Install notes
+
+            **macOS** — unzip and drag to Applications. The build is not yet
+            notarized, so on first launch macOS will object: right-click the
+            app → **Open** (older macOS), or go to **System Settings →
+            Privacy & Security → Open Anyway** (Sequoia and later). You only
+            have to do this once. First launch asks for microphone access.
+
+            **Windows** — unzip anywhere and run `ProdMeshRemoteRTA.exe`.
+            If SmartScreen appears: **More info → Run anyway** (unsigned
+            free software — the source is right here in this repo).
