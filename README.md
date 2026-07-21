@@ -232,7 +232,9 @@ across restarts and is reported in `/api/status` as `mic_correction`.
 Enable it under **Settings → API & Streaming…** (or launch with
 `ProdMeshRemoteRTA --api 8517`). The URL in the status bar is reachable from
 any machine on the LAN — allow the app through the firewall when Windows
-asks. All endpoints are read-only GETs returning JSON with
+asks. On multi-NIC FOH machines the **Interface** picker binds the server to
+one network (e.g. your control LAN, or localhost only) so Dante / SoundGrid
+networks never see HTTP traffic. All endpoints are read-only GETs returning JSON with
 `Access-Control-Allow-Origin: *`:
 
 | Endpoint | Returns |

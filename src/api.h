@@ -83,9 +83,10 @@ public:
         });
     }
 
-    bool listen(quint16 port) {
+    bool listen(quint16 port,
+                const QHostAddress &addr = QHostAddress(QHostAddress::Any)) {
         close();
-        return m_server.listen(QHostAddress::Any, port);
+        return m_server.listen(addr, port);
     }
 
     void close() {

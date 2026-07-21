@@ -22,8 +22,10 @@
 #include <functional>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QHostAddress>
 #include <QIcon>
 #include <QLabel>
+#include <QNetworkInterface>
 #include <QMainWindow>
 #include <QMediaDevices>
 #include <QMenu>
@@ -480,7 +482,8 @@ public:
 
 class ApiSettingsDialog : public QDialog {
 public:
-    ApiSettingsDialog(QWidget *parent, bool enabled, int port, int rateIdx)
+    ApiSettingsDialog(QWidget *parent, bool enabled, int port, int rateIdx,
+                      const QString &bind)
         : QDialog(parent) {
         setWindowTitle("API Settings");
         auto *form = new QFormLayout(this);
@@ -493,6 +496,37 @@ public:
         portSpin->setRange(1024, 65535);
         portSpin->setValue(port);
         form->addRow("Port:", portSpin);
+
+        // Multi-NIC FOH machines (Dante / SoundGrid / control / internet):
+        // bind the server to one network so audio-transport LANs stay clean.
+        ifaceCombo = new QComboBox;
+        ifaceCombo->addItem("All interfaces", QString());
+        ifaceCombo->addItem("Localhost only (127.0.0.1)",
+                            QString("127.0.0.1"));
+        for (const QNetworkInterface &ni : QNetworkInterface::allInterfaces()) {
+            if (!(ni.flags() & QNetworkInterface::IsUp))
+                continue;
+            for (const QNetworkAddressEntry &e : ni.addressEntries()) {
+                const QHostAddress a = e.ip();
+                if (a.protocol() != QAbstractSocket::IPv4Protocol ||
+                    a.isLoopback())
+                    continue;
+                ifaceCombo->addItem(
+                    QString("%1 — %2").arg(ni.humanReadableName(),
+                                           a.toString()),
+                    a.toString());
+            }
+        }
+        int bi = ifaceCombo->findData(bind);
+        if (bi < 0 && !bind.isEmpty()) {  // saved NIC not present right now
+            ifaceCombo->addItem(QString("(saved) %1").arg(bind), bind);
+            bi = ifaceCombo->count() - 1;
+        }
+        ifaceCombo->setCurrentIndex(std::max(0, bi));
+        ifaceCombo->setToolTip(
+            "Which network the API listens on. Pick your control LAN to "
+            "keep it off Dante / SoundGrid networks.");
+        form->addRow("Interface:", ifaceCombo);
 
         rateCombo = new QComboBox;
         rateCombo->addItems({"1 Hz", "5 Hz", "10 Hz", "20 Hz"});
@@ -516,9 +550,14 @@ public:
         form->addRow(buttons);
     }
 
+    QString bindAddress() const {
+        return ifaceCombo->currentData().toString();
+    }
+
     QCheckBox *enableCheck;
     QSpinBox *portSpin;
     QComboBox *rateCombo;
+    QComboBox *ifaceCombo;
 };
 
 // ---------------------------------------------------------------------------
@@ -1054,12 +1093,14 @@ private:
     }
 
     void showApiSettings() {
-        ApiSettingsDialog dlg(this, m_apiEnabled, m_apiPort, m_streamRateIdx);
+        ApiSettingsDialog dlg(this, m_apiEnabled, m_apiPort, m_streamRateIdx,
+                              m_apiBind);
         if (dlg.exec() != QDialog::Accepted)
             return;
         m_apiEnabled = dlg.enableCheck->isChecked();
         m_apiPort = dlg.portSpin->value();
         m_streamRateIdx = dlg.rateCombo->currentIndex();
+        m_apiBind = dlg.bindAddress();
         applyApiState();
         saveSettings();
     }
@@ -1097,6 +1138,7 @@ private:
         m_peakCheck->setChecked(st.value("peakHold", false).toBool());
         m_apiEnabled = st.value("apiEnabled", false).toBool();
         m_apiPort = st.value("apiPort", 8517).toInt();
+        m_apiBind = st.value("apiBind").toString();  // empty = all interfaces
         m_streamRateIdx = st.value("streamRate", 2).toInt();  // default 10 Hz
         m_savedDevice = st.value("device").toString();
         m_inputChannel = st.value("inputChannel", 0).toInt();
@@ -1166,6 +1208,7 @@ private:
         st.setValue("peakHold", m_peakCheck->isChecked());
         st.setValue("apiEnabled", m_apiEnabled);
         st.setValue("apiPort", m_apiPort);
+        st.setValue("apiBind", m_apiBind);
         st.setValue("streamRate", m_streamRateIdx);
         st.setValue("micCorrFile", m_micCorrPath);
         st.setValue("spectroTheme", m_spectroThemeCombo->currentIndex());
@@ -1272,17 +1315,29 @@ private:
     void applyApiState() {
         if (m_apiEnabled) {
             const quint16 port = quint16(m_apiPort);
-            if (m_api->listen(port)) {
+            const QHostAddress bind =
+                m_apiBind.isEmpty() ? QHostAddress(QHostAddress::Any)
+                                    : QHostAddress(m_apiBind);
+            if (m_api->listen(port, bind)) {
+                const QString url =
+                    m_apiBind.isEmpty()
+                        ? ApiServer::localUrl(port)
+                        : QString("http://%1:%2").arg(m_apiBind).arg(port);
                 m_apiLbl->setStyleSheet("color:#8a92a6;");
-                m_apiLbl->setText(QString("Dashboard %1  ·  API %1/api")
-                                      .arg(ApiServer::localUrl(port)));
+                m_apiLbl->setText(
+                    QString("Dashboard %1  ·  API %1/api").arg(url));
             } else {
                 m_apiLbl->setStyleSheet("color:#e05c5c;");
                 m_apiLbl->setText(
-                    QString("API error: %1").arg(m_api->errorString()));
+                    QString("API error on %1: %2")
+                        .arg(m_apiBind.isEmpty() ? "any interface" : m_apiBind,
+                             m_api->errorString()));
                 // Also on stderr — the status bar is invisible when run
                 // headless via --api.
-                std::fprintf(stderr, "API error on port %d: %s\n", m_apiPort,
+                std::fprintf(stderr, "API error on port %d (%s): %s\n",
+                             m_apiPort,
+                             m_apiBind.isEmpty() ? "any"
+                                                 : qPrintable(m_apiBind),
                              qPrintable(m_api->errorString()));
             }
         } else {
@@ -1436,6 +1491,7 @@ private:
     ApiServer *m_api;
     bool m_apiEnabled = false;
     int m_apiPort = 8517;
+    QString m_apiBind;  // bind address; empty = all interfaces
     int m_streamRateIdx = 2;  // 10 Hz
     QComboBox *m_deviceCombo;
     QComboBox *m_chanCombo;
