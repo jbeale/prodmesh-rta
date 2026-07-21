@@ -627,6 +627,12 @@ private:
 
 // ---------------------------------------------------------------------------
 
+// Traffic-light alarm states shared by the readout widgets: 0 = normal,
+// 1 = warning (yellow), 2 = alert (red).
+inline const char *alarmColor(int state) {
+    return state >= 2 ? "#e05c5c" : state == 1 ? "#e8c84b" : "#e8ecf4";
+}
+
 class SplReadout : public QWidget {
 public:
     explicit SplReadout(const QString &caption) {
@@ -655,9 +661,17 @@ public:
                            : QString("--.-"));
     }
 
+    void setAlarmState(int state) {
+        if (state == m_alarm)
+            return;
+        m_alarm = state;
+        m_val->setStyleSheet(QString("color:%1;").arg(alarmColor(state)));
+    }
+
 private:
     QLabel *m_cap;
     QLabel *m_val;
+    int m_alarm = 0;
 };
 
 // One displayed metric: which, how to caption it, and its current value.
@@ -666,6 +680,7 @@ struct MetricDisplay {
     QString caption;
     double value = kNaN;
     QString suffix;  // e.g. "%" for dose metrics
+    int alarm = 0;   // 0 normal, 1 warning, 2 alert
 };
 
 // ---------------------------------------------------------------------------
@@ -725,6 +740,13 @@ public:
         }
     }
 
+    void setAlarmState(int state) {
+        if (state == m_alarm)
+            return;
+        m_alarm = state;
+        m_val->setStyleSheet(QString("color:%1;").arg(alarmColor(state)));
+    }
+
     void resetMax() {
         m_maxVal = kNaN;
         m_max->setText("MAX --.-");
@@ -741,6 +763,7 @@ private:
     QLabel *m_cap;
     QLabel *m_val;
     ClickableLabel *m_max;
+    int m_alarm = 0;
 };
 
 // Compact 10-minute SPL history strip for the breakout window.
@@ -875,8 +898,10 @@ public:
 
     void updateMetrics(const std::vector<MetricDisplay> &vals) {
         for (const MetricDisplay &v : vals)
-            if (MetricTile *t = m_tiles.value(v.id))
+            if (MetricTile *t = m_tiles.value(v.id)) {
                 t->set(v.caption, v.value, v.suffix);
+                t->setAlarmState(v.alarm);
+            }
     }
 
     void pushSpark(qint64 t, double splDb) {

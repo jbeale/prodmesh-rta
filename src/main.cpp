@@ -10,11 +10,13 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QStandardPaths>
 #include <QTextStream>
 
 #include <functional>
@@ -366,6 +368,62 @@ private:
 
 // ---------------------------------------------------------------------------
 
+class AlarmsDialog : public QDialog {
+public:
+    AlarmsDialog(QWidget *parent, bool enabled, const QString &metricId,
+                 double warnDb, double alertDb)
+        : QDialog(parent) {
+        setWindowTitle("SPL Alarms");
+        auto *form = new QFormLayout(this);
+
+        enableCheck = new QCheckBox("Color readouts when levels get high");
+        enableCheck->setChecked(enabled);
+        form->addRow("Alarms:", enableCheck);
+
+        metricCombo = new QComboBox;
+        for (const MetricInfo &mi : kMetricInfos)
+            metricCombo->addItem(mi.name, QString(mi.id));
+        const int i = metricCombo->findData(metricId);
+        if (i >= 0)
+            metricCombo->setCurrentIndex(i);
+        form->addRow("Watch metric:", metricCombo);
+
+        warnSpin = new QDoubleSpinBox;
+        warnSpin->setRange(40.0, 140.0);
+        warnSpin->setDecimals(1);
+        warnSpin->setSuffix(" dB");
+        warnSpin->setValue(warnDb);
+        form->addRow("Warning (yellow) at:", warnSpin);
+
+        alertSpin = new QDoubleSpinBox;
+        alertSpin->setRange(40.0, 140.0);
+        alertSpin->setDecimals(1);
+        alertSpin->setSuffix(" dB");
+        alertSpin->setValue(alertDb);
+        form->addRow("Alert (red) at:", alertSpin);
+
+        auto *hint = new QLabel(
+            "Traffic-light coloring on the watched metric, everywhere it is\n"
+            "displayed (top bar, breakout, web dashboard, API). Typical show\n"
+            "limits: warn 95-99, alert 102-103 dBA LAeq.");
+        hint->setStyleSheet("color:#8a92a6; font-size:11px;");
+        form->addRow(hint);
+
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
+                                             QDialogButtonBox::Cancel);
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        form->addRow(buttons);
+    }
+
+    QCheckBox *enableCheck;
+    QComboBox *metricCombo;
+    QDoubleSpinBox *warnSpin;
+    QDoubleSpinBox *alertSpin;
+};
+
+// ---------------------------------------------------------------------------
+
 class ApiSettingsDialog : public QDialog {
 public:
     ApiSettingsDialog(QWidget *parent, bool enabled, int port, int rateIdx)
@@ -390,6 +448,7 @@ public:
         form->addRow("Stream rate:", rateCombo);
 
         auto *hint = new QLabel(
+            "Live browser dashboard: http://<this machine>:<port>/\n"
             "Endpoints: /api/status, /api/spl, /api/rta, /api/history\n"
             "WebSocket stream: ws://<this machine>:<port>/api/stream\n"
             "Allow the app through the firewall for LAN access.");
@@ -627,6 +686,7 @@ public:
 protected:
     void closeEvent(QCloseEvent *event) override {
         saveSettings();
+        stopLog(false);
         m_engine.stop();
         QMainWindow::closeEvent(event);
     }
@@ -634,6 +694,9 @@ protected:
 private:
     void buildMenus() {
         QMenu *fileMenu = menuBar()->addMenu("&File");
+        m_logAct = fileMenu->addAction("Start SPL &Log…");
+        connect(m_logAct, &QAction::triggered, this, [this] { toggleLog(); });
+        fileMenu->addSeparator();
         QAction *quitAct = fileMenu->addAction("&Quit");
         quitAct->setShortcut(QKeySequence::Quit);
         connect(quitAct, &QAction::triggered, this, &QWidget::close);
@@ -665,6 +728,9 @@ private:
         QAction *metricsAct = settingsMenu->addAction("&Metrics…");
         connect(metricsAct, &QAction::triggered, this,
                 [this] { showMetricsSettings(); });
+        QAction *alarmsAct = settingsMenu->addAction("A&larms…");
+        connect(alarmsAct, &QAction::triggered, this,
+                [this] { showAlarmSettings(); });
         QAction *apiAct = settingsMenu->addAction("&API && Streaming…");
         connect(apiAct, &QAction::triggered, this, [this] { showApiSettings(); });
 
@@ -752,6 +818,94 @@ private:
         m_breakout->setTiles(m_breakoutMetrics);
     }
 
+    void showAlarmSettings() {
+        AlarmsDialog dlg(this, m_alarmEnabled, m_alarmMetric, m_alarmWarn,
+                         m_alarmAlert);
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+        m_alarmEnabled = dlg.enableCheck->isChecked();
+        m_alarmMetric = dlg.metricCombo->currentData().toString();
+        m_alarmWarn = dlg.warnSpin->value();
+        m_alarmAlert = dlg.alertSpin->value();
+        saveSettings();
+    }
+
+    // 0 = normal, 1 = warning, 2 = alert, for the watched metric only.
+    int alarmStateFor(const QString &id, const MetricValues &mv) const {
+        if (!m_alarmEnabled || id != m_alarmMetric)
+            return 0;
+        const double v = metricValue(id, mv);
+        if (!std::isfinite(v))
+            return 0;
+        return v >= m_alarmAlert ? 2 : v >= m_alarmWarn ? 1 : 0;
+    }
+
+    // --- 1 Hz CSV logging of all metrics ---
+
+    void toggleLog() {
+        if (m_logFile.isOpen()) {
+            stopLog(true);
+            return;
+        }
+        const QString def =
+            QDir(QStandardPaths::writableLocation(
+                     QStandardPaths::DocumentsLocation))
+                .filePath(QString("spl-log-%1.csv")
+                              .arg(QDateTime::currentDateTime().toString(
+                                  "yyyyMMdd-HHmmss")));
+        const QString path = QFileDialog::getSaveFileName(
+            this, "Start SPL Log", def, "CSV files (*.csv);;All files (*)");
+        if (path.isEmpty())
+            return;
+        m_logFile.setFileName(path);
+        if (!m_logFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QMessageBox::warning(
+                this, "SPL Log",
+                QString("Could not open \"%1\" for writing.").arg(path));
+            return;
+        }
+        QStringList head{"time"};
+        for (const MetricInfo &mi : kMetricInfos)
+            head << mi.id;
+        head << "alarm";
+        m_logFile.write(head.join(',').toUtf8() + "\n");
+        m_lastLogMs = 0;
+        m_logAct->setText(QString("Stop SPL &Log (%1)")
+                              .arg(QFileInfo(path).fileName()));
+        statusBar()->showMessage(
+            QString("Logging SPL metrics to %1 (1 s interval)").arg(path),
+            6000);
+    }
+
+    void stopLog(bool announce) {
+        if (!m_logFile.isOpen())
+            return;
+        const QString name = QFileInfo(m_logFile.fileName()).fileName();
+        m_logFile.close();
+        m_logAct->setText("Start SPL &Log…");
+        if (announce)
+            statusBar()->showMessage(QString("SPL log %1 closed").arg(name),
+                                     6000);
+    }
+
+    void logTick(qint64 now, const MetricValues &mv, int alarmState) {
+        if (!m_logFile.isOpen() || now - m_lastLogMs < 1000)
+            return;
+        m_lastLogMs = now;
+        QStringList row{QDateTime::fromMSecsSinceEpoch(now).toString(
+            Qt::ISODateWithMs)};
+        for (const MetricInfo &mi : kMetricInfos) {
+            const double v = metricValue(mi.id, mv);
+            row << (std::isfinite(v) ? QString::number(v, 'f', 2) : QString());
+        }
+        row << QString::number(alarmState);
+        m_logFile.write(row.join(',').toUtf8() + "\n");
+        if (now - m_lastLogFlush >= 10000) {  // survive crashes/power loss
+            m_lastLogFlush = now;
+            m_logFile.flush();
+        }
+    }
+
     void rebuildReadouts() {
         for (auto &pr : m_readouts) {
             m_splRow->removeWidget(pr.second);
@@ -811,8 +965,8 @@ private:
         for (const QString &id : ids) {
             if (id == "spark")
                 continue;
-            out.push_back(
-                {id, metricCaption(id), metricValue(id, mv), metricSuffix(id)});
+            out.push_back({id, metricCaption(id), metricValue(id, mv),
+                           metricSuffix(id), alarmStateFor(id, mv)});
         }
         return out;
     }
@@ -891,6 +1045,10 @@ private:
                 .toStringList();
         m_leqShortS = st.value("leqShortS", 60).toInt();
         m_leqLongS = st.value("leqLongS", 900).toInt();
+        m_alarmEnabled = st.value("alarmEnabled", false).toBool();
+        m_alarmMetric = st.value("alarmMetric", "las").toString();
+        m_alarmWarn = st.value("alarmWarn", 96.0).toDouble();
+        m_alarmAlert = st.value("alarmAlert", 102.0).toDouble();
         applyMetricsConfig();
         if (st.value("breakoutOpen", false).toBool())
             m_breakoutAct->setChecked(true);  // toggled handler shows it
@@ -924,6 +1082,10 @@ private:
         st.setValue("metricsBreakout", m_breakoutMetrics);
         st.setValue("leqShortS", m_leqShortS);
         st.setValue("leqLongS", m_leqLongS);
+        st.setValue("alarmEnabled", m_alarmEnabled);
+        st.setValue("alarmMetric", m_alarmMetric);
+        st.setValue("alarmWarn", m_alarmWarn);
+        st.setValue("alarmAlert", m_alarmAlert);
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
         st.setValue("geometry", saveGeometry());
@@ -983,8 +1145,8 @@ private:
             const quint16 port = quint16(m_apiPort);
             if (m_api->listen(port)) {
                 m_apiLbl->setStyleSheet("color:#8a92a6;");
-                m_apiLbl->setText(
-                    QString("API %1/api").arg(ApiServer::localUrl(port)));
+                m_apiLbl->setText(QString("Dashboard %1  ·  API %1/api")
+                                      .arg(ApiServer::localUrl(port)));
             } else {
                 m_apiLbl->setStyleSheet("color:#e05c5c;");
                 m_apiLbl->setText(
@@ -1052,9 +1214,11 @@ private:
         mv.laf = res.fast + cal;
         mv.las = res.slow + cal;
         mv.leq = res.leq + cal;
-        for (auto &pr : m_readouts)
+        for (auto &pr : m_readouts) {
             pr.second->set(metricCaption(pr.first), metricValue(pr.first, mv),
                            metricSuffix(pr.first));
+            pr.second->setAlarmState(alarmStateFor(pr.first, mv));
+        }
 
         for (double &b : res.bands)
             b += cal;
@@ -1087,7 +1251,14 @@ private:
         snap.metrics.clear();
         for (const MetricInfo &mi : kMetricInfos)
             snap.metrics.push_back({mi.id, metricValue(mi.id, mv)});
+        const int alarmState = alarmStateFor(m_alarmMetric, mv);
+        snap.alarmEnabled = m_alarmEnabled;
+        snap.alarmMetric = m_alarmMetric;
+        snap.alarmState = alarmState;
+        snap.alarmWarn = m_alarmWarn;
+        snap.alarmAlert = m_alarmAlert;
         m_api->setSnapshot(snap);
+        logTick(now, mv, alarmState);
         if (now - m_lastHistPush >= 1000) {
             m_lastHistPush = now;
             m_api->pushHistory(
@@ -1117,6 +1288,14 @@ private:
     QString m_micCorrName;
     QAction *m_clearMicAct = nullptr;
     double m_lastSlowDbfs = kNaN;
+    bool m_alarmEnabled = false;
+    QString m_alarmMetric = "las";
+    double m_alarmWarn = 96.0;
+    double m_alarmAlert = 102.0;
+    QAction *m_logAct = nullptr;
+    QFile m_logFile;
+    qint64 m_lastLogMs = 0;
+    qint64 m_lastLogFlush = 0;
     ApiServer *m_api;
     bool m_apiEnabled = false;
     int m_apiPort = 8517;

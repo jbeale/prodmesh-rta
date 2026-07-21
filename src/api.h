@@ -1,6 +1,7 @@
 // HTTP/JSON + WebSocket API so external tools (e.g. ProdMesh on another
 // machine) can poll or stream live levels and fetch service-long history.
 //
+//   GET /                      live browser dashboard (webui.h)
 //   GET /api/status            server + measurement configuration
 //   GET /api/spl               current Fast/Slow/Leq in dB SPL
 //   GET /api/rta               current 1/3-octave band levels
@@ -33,6 +34,7 @@
 #include <vector>
 
 #include "dsp.h"
+#include "webui.h"
 
 class ApiServer : public QObject {
 public:
@@ -47,6 +49,11 @@ public:
         QString micCorr;                              // cal file name, or empty
         // Derived SPL metrics (id -> value); see the Metrics dialog for ids.
         std::vector<std::pair<QString, double>> metrics;
+        // Traffic-light alarm on one watched metric.
+        bool alarmEnabled = false;
+        QString alarmMetric;
+        int alarmState = 0;  // 0 ok, 1 warning, 2 alert
+        double alarmWarn = 0.0, alarmAlert = 0.0;
     };
     struct HistSample {
         qint64 t = 0;
@@ -139,6 +146,7 @@ private:
         o.insert("peaks_db",
                  m_snap.peaks.empty() ? QJsonValue() : jarr(m_snap.peaks));
         o.insert("metrics", metricsJson());
+        o.insert("alarm", alarmJson());
         return o;
     }
 
@@ -147,6 +155,16 @@ private:
         for (const auto &m : m_snap.metrics)
             met.insert(m.first, jnum(m.second));
         return met;
+    }
+
+    QJsonObject alarmJson() const {
+        return QJsonObject{
+            {"enabled", m_snap.alarmEnabled},
+            {"metric", m_snap.alarmMetric},
+            {"state", m_snap.alarmState},
+            {"warn_db", m_snap.alarmWarn},
+            {"alert_db", m_snap.alarmAlert},
+        };
     }
 
     void onData(QTcpSocket *sock) {
@@ -181,8 +199,14 @@ private:
             respond(sock, 405, QJsonDocument(QJsonObject{{"error", "GET only"}}));
             return;
         }
-        if (QUrl(target).path() == "/api/stream") {
+        const QString path = QUrl(target).path();
+        if (path == "/api/stream") {
             upgradeToWs(sock, header);
+            return;
+        }
+        if (path == "/" || path == "/index.html") {
+            respondRaw(sock, "200 OK", QByteArray(kDashboardHtml),
+                       "text/html; charset=utf-8");
             return;
         }
         bool found = true;
@@ -298,9 +322,10 @@ private:
         const QUrlQuery query(url);
         const qint64 now = m_snap.timeMs;
 
-        if (path == "/" || path == "/api" || path == "/api/") {
+        if (path == "/api" || path == "/api/") {
             return QJsonDocument(QJsonObject{
                 {"app", "prodmesh-remote-rta"},
+                {"dashboard", "/"},
                 {"endpoints",
                  QJsonArray{"/api/status", "/api/spl", "/api/rta",
                             "/api/history?since_ms=&limit=",
@@ -333,6 +358,7 @@ private:
                 {"slow_db", jnum(m_snap.slow)},
                 {"leq_db", jnum(m_snap.leq)},
                 {"metrics", metricsJson()},
+                {"alarm", alarmJson()},
             });
         }
         if (path == "/api/rta") {
@@ -376,11 +402,13 @@ private:
         respondRaw(sock, phrase, doc.toJson(QJsonDocument::Compact));
     }
 
-    void respondRaw(QTcpSocket *sock, const char *status, const QByteArray &body) {
+    void respondRaw(QTcpSocket *sock, const char *status, const QByteArray &body,
+                    const char *contentType = "application/json") {
         QByteArray resp = "HTTP/1.1 ";
         resp += status;
-        resp += "\r\nContent-Type: application/json\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
+        resp += "\r\nContent-Type: ";
+        resp += contentType;
+        resp += "\r\nAccess-Control-Allow-Origin: *\r\n"
                 "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
                 "Connection: close\r\n"
                 "Content-Length: " + QByteArray::number(body.size()) +

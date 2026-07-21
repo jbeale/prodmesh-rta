@@ -15,7 +15,24 @@ input and get
 The C++ version additionally has:
 
 - **Spectrogram** — scrolling 30 s log-frequency heat map (tab next to RTA)
+  with selectable color themes, range, and sensitivity, plus a hover
+  frequency cursor
+- **Hi-res RTA line view** — 1/24-octave line spectrum with hover
+  frequency/level readout (bar view snaps to the band)
 - **SPL history strip** — the last 10 minutes of Fast/Slow at a glance
+- **Smaart-style SPL metrics** — rolling LAeq (two configurable windows),
+  LZpk/LCpk, C-A ratio, L10/L50/L90, NIOSH/OSHA dose; pick which appear in
+  the top bar and breakout under **Settings → Metrics…**
+- **Metric breakout** — a narrow always-on-top window of big readouts (with
+  click-to-reset maxima and an SPL sparkline) to park next to your console
+  software (**View → Metric Breakout**, Ctrl/Cmd+B)
+- **SPL alarms** — traffic-light thresholds on a watched metric; readouts
+  turn yellow/red everywhere, including the web dashboard
+  (**Settings → Alarms…**)
+- **SPL logging** — 1 Hz CSV of every metric for compliance records
+  (**File → Start SPL Log…**)
+- **Web dashboard** — a live browser page (readouts, metric grid, RTA bars)
+  served at the API root, viewable from any device on the LAN
 - **Persistent settings** — cal, weighting, device, averaging, API config,
   and window geometry survive restarts
 - **HTTP + WebSocket API** — JSON endpoints other machines can poll, plus a
@@ -162,11 +179,16 @@ asks. All endpoints are read-only GETs returning JSON with
 
 | Endpoint | Returns |
 |---|---|
+| `/` | live browser dashboard (readouts, metric grid, RTA bars) |
 | `/api/status` | sample rate, weighting, cal, uptime, history length |
-| `/api/spl` | current `fast_db`, `slow_db`, `leq_db` (dB SPL, cal applied) |
-| `/api/rta` | `centers_hz` + `bands_db` (31 values) + `peaks_db` |
+| `/api/spl` | current `fast_db`, `slow_db`, `leq_db` + `metrics` + `alarm` |
+| `/api/rta` | `centers_hz` + `bands_db` (31 values) + `peaks_db` + `metrics` |
 | `/api/history?since_ms=&limit=` | 1 Hz SPL samples, up to 6 hours |
 | `ws://…/api/stream` | WebSocket: pushes SPL + bands at the configured rate |
+
+`metrics` maps metric ids (`laf las leq leqS leqL lzpk lcpk ca l10 l50 l90
+doseN doseO`) to values; `alarm` reports the watched metric, thresholds, and
+traffic-light `state` (0 ok / 1 warning / 2 alert).
 
 ### Live streaming
 
