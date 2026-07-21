@@ -5,6 +5,7 @@
 #include <QCloseEvent>
 #include <QColor>
 #include <QFont>
+#include <QFontMetrics>
 #include <QHash>
 #include <QImage>
 #include <QLabel>
@@ -47,11 +48,48 @@ inline const QColor peak("#e0c05c");
 inline const QColor faint("#3a6b5f");
 }  // namespace theme
 
+inline QString fmtFreq(double f) {
+    if (f >= 9999.5)
+        return QString("%1 kHz").arg(f / 1000.0, 0, 'f', 1);
+    if (f >= 1000.0)
+        return QString("%1 kHz").arg(f / 1000.0, 0, 'f', 2);
+    return QString("%1 Hz").arg(f, 0, 'f', 0);
+}
+
+// Tooltip-style box near the cursor, kept inside the plot area. Sized to be
+// readable from a distance (FOH monitors are rarely at arm's length).
+inline void drawHoverLabel(QPainter &qp, const QString &text, QPoint mouse,
+                           int left, int w, int top) {
+    const QFont saved = qp.font();
+    QFont f = saved;
+    f.setPointSize(15);
+    f.setBold(true);
+    qp.setFont(f);
+    const QFontMetrics fm(f);
+    const int bw = fm.horizontalAdvance(text) + 18;
+    const int bh = fm.height() + 10;
+    int x = mouse.x() + 14, y = mouse.y() - bh - 8;
+    if (x + bw > left + w)
+        x = mouse.x() - bw - 14;
+    if (y < top)
+        y = mouse.y() + 14;
+    const QRect box(x, y, bw, bh);
+    qp.setPen(QPen(theme::grid, 1));
+    qp.setBrush(QColor(0x20, 0x24, 0x2e, 235));
+    qp.drawRect(box);
+    qp.setPen(QColor("#e8ecf4"));
+    qp.drawText(box, Qt::AlignCenter, text);
+    qp.setFont(saved);
+}
+
 // ---------------------------------------------------------------------------
 
 class RtaWidget : public QWidget {
 public:
-    RtaWidget() { setMinimumHeight(240); }
+    RtaWidget() {
+        setMinimumHeight(240);
+        setMouseTracking(true);  // hover frequency/level readout
+    }
 
     void setViewMode(int mode) {  // 0 = bars, 1 = line
         m_mode = mode;
@@ -63,21 +101,11 @@ public:
     void setDecayRate(double dbPerSec) { m_decay = dbPerSec; }
 
     void setData(const std::vector<double> &bands,
+                 const std::vector<double> &hires,
                  const std::vector<double> &peaks, double yMin, double yMax,
                  double dt) {
-        if (m_decay <= 0.0 || m_disp.size() != bands.size()) {
-            m_disp = bands;
-        } else {
-            for (size_t i = 0; i < bands.size(); ++i) {
-                const double fallen = m_disp[i] - m_decay * dt;
-                if (!std::isfinite(fallen))
-                    m_disp[i] = bands[i];
-                else if (std::isfinite(bands[i]))
-                    m_disp[i] = std::max(bands[i], fallen);
-                else
-                    m_disp[i] = fallen;
-            }
-        }
+        applyDecay(m_disp, bands, dt);
+        applyDecay(m_dispHi, hires, dt);
         m_peaks = peaks;
         m_yMin = yMin;
         m_yMax = yMax;
@@ -85,6 +113,18 @@ public:
     }
 
 protected:
+    void mouseMoveEvent(QMouseEvent *e) override {
+        m_mouse = e->position().toPoint();
+        update();
+        QWidget::mouseMoveEvent(e);
+    }
+
+    void leaveEvent(QEvent *e) override {
+        m_mouse = QPoint(-1, -1);
+        update();
+        QWidget::leaveEvent(e);
+    }
+
     void paintEvent(QPaintEvent *) override {
         QPainter qp(this);
         qp.fillRect(rect(), theme::bg);
@@ -125,14 +165,21 @@ protected:
         }
 
         if (m_mode == 1) {
+            // Prefer the 1/24-octave spectrum; fall back to band data.
+            const bool hi = int(m_dispHi.size()) == HIRES_POINTS;
+            const std::vector<double> &src = hi ? m_dispHi : m_disp;
+            const int n = std::min(hi ? HIRES_POINTS : NUM_BANDS,
+                                   int(src.size()));
             QPainterPath line;
             double firstX = 0, lastX = 0;
             bool started = false;
-            for (int i = 0; i < NUM_BANDS && i < int(m_disp.size()); ++i) {
-                if (!std::isfinite(m_disp[i]))
+            for (int i = 0; i < n; ++i) {
+                if (!std::isfinite(src[i]))
                     continue;
-                const double x = left + (i + 0.5) * slot;
-                const double v = std::clamp(m_disp[i], m_yMin, m_yMax);
+                const double x =
+                    hi ? left + slot * slotOfFreq(hiresFreq(i))
+                       : left + (i + 0.5) * slot;
+                const double v = std::clamp(src[i], m_yMin, m_yMax);
                 if (!started) {
                     line.moveTo(x, yOf(v));
                     firstX = x;
@@ -186,14 +233,85 @@ protected:
         qp.setPen(QPen(theme::grid, 1));
         qp.setBrush(Qt::NoBrush);
         qp.drawRect(left, top, w, h);
+
+        // Hover readout: frequency and trace level under the cursor. Line
+        // view reads the hi-res point there; bar view snaps to the band.
+        if (m_mouse.x() >= left && m_mouse.x() <= left + w &&
+            m_mouse.y() >= top && m_mouse.y() <= top + h) {
+            const double s = (m_mouse.x() - left) / slot;
+            const bool hi =
+                m_mode == 1 && int(m_dispHi.size()) == HIRES_POINTS;
+            double f = kNaN, level = kNaN;
+            if (hi) {
+                const double fc = freqOfSlot(s);
+                const int i = std::clamp(
+                    int(std::lround((HIRES_POINTS - 1) * std::log(fc / 20.0) /
+                                    std::log(1000.0))),
+                    0, HIRES_POINTS - 1);
+                f = hiresFreq(i);
+                level = m_dispHi[i];
+            } else {
+                const int i = std::clamp(int(s), 0, NUM_BANDS - 1);
+                f = THIRD_OCT_CENTERS[i];
+                if (i < int(m_disp.size()))
+                    level = m_disp[i];
+            }
+            qp.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt::DashLine));
+            qp.drawLine(m_mouse.x(), top, m_mouse.x(), top + h);
+            if (std::isfinite(level)) {
+                qp.setRenderHint(QPainter::Antialiasing);
+                qp.setPen(Qt::NoPen);
+                qp.setBrush(theme::peak);
+                qp.drawEllipse(
+                    QPointF(m_mouse.x(),
+                            yOf(std::clamp(level, m_yMin, m_yMax))),
+                    3.0, 3.0);
+                qp.setRenderHint(QPainter::Antialiasing, false);
+            }
+            const QString txt =
+                std::isfinite(level)
+                    ? QString("%1   %2 dB")
+                          .arg(fmtFreq(f))
+                          .arg(level, 0, 'f', 1)
+                    : fmtFreq(f);
+            drawHoverLabel(qp, txt, m_mouse, left, w, top);
+        }
     }
 
 private:
+    // Log-frequency slot coordinate: 20 Hz -> slot 0.5 and 20 kHz -> slot
+    // 30.5, matching the 1/3-octave bar centers at both ends.
+    static double slotOfFreq(double f) {
+        return 0.5 + (NUM_BANDS - 1) * std::log(f / 20.0) / std::log(1000.0);
+    }
+    static double freqOfSlot(double s) {
+        return 20.0 * std::pow(1000.0, (s - 0.5) / (NUM_BANDS - 1));
+    }
+
+    void applyDecay(std::vector<double> &disp, const std::vector<double> &data,
+                    double dt) {
+        if (m_decay <= 0.0 || disp.size() != data.size()) {
+            disp = data;
+            return;
+        }
+        for (size_t i = 0; i < data.size(); ++i) {
+            const double fallen = disp[i] - m_decay * dt;
+            if (!std::isfinite(fallen))
+                disp[i] = data[i];
+            else if (std::isfinite(data[i]))
+                disp[i] = std::max(data[i], fallen);
+            else
+                disp[i] = fallen;
+        }
+    }
+
     std::vector<double> m_disp;
+    std::vector<double> m_dispHi;
     std::vector<double> m_peaks;
     double m_yMin = 20.0, m_yMax = 120.0;
     int m_mode = 0;
     double m_decay = 0.0;
+    QPoint m_mouse{-1, -1};
 };
 
 // ---------------------------------------------------------------------------
@@ -214,6 +332,7 @@ public:
         rebuildLut();
         m_img.fill(m_lut[0]);
         setMinimumHeight(240);
+        setMouseTracking(true);  // hover frequency cursor
     }
 
     static QStringList themeNames() {
@@ -262,6 +381,18 @@ public:
     }
 
 protected:
+    void mouseMoveEvent(QMouseEvent *e) override {
+        m_mouse = e->position().toPoint();
+        update();
+        QWidget::mouseMoveEvent(e);
+    }
+
+    void leaveEvent(QEvent *e) override {
+        m_mouse = QPoint(-1, -1);
+        update();
+        QWidget::leaveEvent(e);
+    }
+
     void paintEvent(QPaintEvent *) override {
         QPainter qp(this);
         qp.fillRect(rect(), theme::bg);
@@ -296,6 +427,16 @@ protected:
         qp.setPen(QPen(theme::grid, 1));
         qp.setBrush(Qt::NoBrush);
         qp.drawRect(left, top, w, h);
+
+        // Hover: horizontal cursor labeled with the frequency of that row.
+        if (m_mouse.x() >= left && m_mouse.x() <= left + w &&
+            m_mouse.y() >= top && m_mouse.y() <= top + h) {
+            const double frac = 1.0 - double(m_mouse.y() - top) / h;
+            const double fr = 20.0 * std::pow(2.0, frac * OCTAVES);
+            qp.setPen(QPen(QColor(255, 255, 255, 110), 1, Qt::DashLine));
+            qp.drawLine(left, m_mouse.y(), left + w, m_mouse.y());
+            drawHoverLabel(qp, fmtFreq(fr), m_mouse, left, w, top);
+        }
     }
 
 private:
@@ -379,6 +520,7 @@ private:
     int m_theme = 0;
     double m_range = 100.0;
     double m_sens = 0.0;
+    QPoint m_mouse{-1, -1};
 };
 
 // ---------------------------------------------------------------------------

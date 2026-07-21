@@ -1060,13 +1060,17 @@ private:
             b += cal;
         for (double &p : res.peaks)
             p += cal;
-        m_rta->setData(res.bands, res.peaks, cal - 80.0, cal + 20.0, dt);
+        for (double &v : res.hires)
+            v += cal;
+        // Scale tops out at cal = SPL at 0 dBFS; the input clips there, so
+        // anything above it is unreachable.
+        m_rta->setData(res.bands, res.hires, res.peaks, cal - 80.0, cal, dt);
         m_spectro->pushColumn(m_analyzer.lastPower(), m_analyzer.binWidth());
         m_breakout->updateMetrics(buildDisplays(m_breakoutMetrics, mv));
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         m_breakout->pushSpark(now, res.slow + cal);
-        m_history->setRange(cal - 80.0, cal + 20.0);
+        m_history->setRange(cal - 80.0, cal);
         m_history->push(now, res.fast + cal, res.slow + cal);
 
         ApiServer::Snapshot snap;
@@ -1174,6 +1178,18 @@ static int selftest() {
     bool ok = std::fabs(res.fast + 3.01) < 0.2 &&
               THIRD_OCT_CENTERS[kMax] == 1000.0 &&
               std::fabs(res.bands[kMax] + 3.01) < 0.3;
+
+    // Hi-res line spectrum: the loudest 1/24-oct point must sit at ~1 kHz
+    // near full tone level (small leakage into neighbors is expected).
+    int hMax = 0;
+    for (int i = 1; i < HIRES_POINTS; ++i)
+        if (std::isfinite(res.hires[i]) &&
+            (!std::isfinite(res.hires[hMax]) || res.hires[i] > res.hires[hMax]))
+            hMax = i;
+    std::printf("hi-res peak = %.1f Hz at %.2f dBFS (expected ~1000 Hz ~ -3)\n",
+                hiresFreq(hMax), res.hires[hMax]);
+    ok = ok && std::fabs(hiresFreq(hMax) - 1000.0) < 25.0 &&
+         std::fabs(res.hires[hMax] + 3.01) < 1.0;
 
     // Parallel weighted powers: A-weight at 1 kHz is 0 dB, so powA ~ -3.01.
     std::printf("powA = %7.2f, powC = %7.2f, powZ = %7.2f dBFS "

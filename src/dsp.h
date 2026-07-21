@@ -22,6 +22,14 @@ inline constexpr double THIRD_OCT_CENTERS[] = {
 };
 inline constexpr int NUM_BANDS = int(sizeof(THIRD_OCT_CENTERS) / sizeof(double));
 
+// High-resolution spectrum for the RTA line view: 1/24-octave-spaced points
+// from 20 Hz to 20 kHz. Each point is the power sum over its window, so pure
+// tones read at their true level.
+inline constexpr int HIRES_POINTS = 240;
+inline double hiresFreq(int i) {
+    return 20.0 * std::pow(1000.0, double(i) / (HIRES_POINTS - 1));
+}
+
 inline double aWeightDb(double f) {
     f = std::max(f, 1e-6);
     const double f2 = f * f;
@@ -128,6 +136,7 @@ struct AnalyzerResult {
     double powA = 0.0, powC = 0.0, powZ = 0.0;
     std::vector<double> bands;
     std::vector<double> peaks;  // empty when peak hold is off
+    std::vector<double> hires;  // 1/24-octave spectrum in dB, for the line view
 };
 
 // FFT-based SPL + 1/3-octave band analysis. All levels in dBFS; the GUI adds
@@ -153,6 +162,7 @@ public:
         m_hasSlow = false;
         resetLeq();
         m_bandP.assign(NUM_BANDS, kNaN);
+        m_hiresP.assign(HIRES_POINTS, kNaN);
         m_hasBandP = false;
         resetPeaks();
     }
@@ -213,31 +223,41 @@ public:
         m_leqSum += P;
         m_leqN += 1;
 
-        // 1/3-octave bands
-        std::vector<double> bandP(NUM_BANDS, kNaN);
-        for (int i = 0; i < NUM_BANDS; ++i) {
-            const Band &b = m_bands[i];
+        // 1/3-octave bands and the hi-res line-view spectrum, with the same
+        // time smoothing applied to both.
+        auto bandPower = [&](const Band &b) -> double {
             if (!b.valid)
-                continue;
+                return kNaN;
             if (!b.idx.empty()) {
                 double s = 0.0;
                 for (int k : b.idx)
                     s += m_power[k];
-                bandP[i] = s;
-            } else {
-                bandP[i] = m_power[b.nearBin] * b.factor;
+                return s;
             }
-        }
+            return m_power[b.nearBin] * b.factor;
+        };
+        std::vector<double> bandP(NUM_BANDS, kNaN);
+        for (int i = 0; i < NUM_BANDS; ++i)
+            bandP[i] = bandPower(m_bands[i]);
+        std::vector<double> hiP(HIRES_POINTS, kNaN);
+        for (int i = 0; i < HIRES_POINTS; ++i)
+            hiP[i] = bandPower(m_hires[i]);
         if (rtaTau > 0.0 && m_hasBandP) {
             const double a = std::exp(-dt / rtaTau);
-            for (int i = 0; i < NUM_BANDS; ++i) {
-                if (std::isfinite(bandP[i]) && std::isfinite(m_bandP[i]))
-                    m_bandP[i] = a * m_bandP[i] + (1 - a) * bandP[i];
-                else
-                    m_bandP[i] = bandP[i];
-            }
+            auto blend = [&](std::vector<double> &prev,
+                             const std::vector<double> &cur) {
+                for (size_t i = 0; i < cur.size(); ++i) {
+                    if (std::isfinite(cur[i]) && std::isfinite(prev[i]))
+                        prev[i] = a * prev[i] + (1 - a) * cur[i];
+                    else
+                        prev[i] = cur[i];
+                }
+            };
+            blend(m_bandP, bandP);
+            blend(m_hiresP, hiP);
         } else {
             m_bandP = bandP;
+            m_hiresP = hiP;
         }
         m_hasBandP = true;
 
@@ -251,6 +271,9 @@ public:
         res.bands.resize(NUM_BANDS);
         for (int i = 0; i < NUM_BANDS; ++i)
             res.bands[i] = std::isfinite(m_bandP[i]) ? toDb(m_bandP[i]) : kNaN;
+        res.hires.resize(HIRES_POINTS);
+        for (int i = 0; i < HIRES_POINTS; ++i)
+            res.hires[i] = std::isfinite(m_hiresP[i]) ? toDb(m_hiresP[i]) : kNaN;
 
         if (peakHold) {
             const double decay = 6.0 * dt;  // 6 dB/s
@@ -302,29 +325,40 @@ private:
         m_splLo = int(std::ceil(20.0 / df));
         m_splHi = std::min(nBins - 1, int(std::floor(20000.0 / df)));
         const double nyq = sr / 2.0;
-        m_bands.assign(NUM_BANDS, Band());
-        for (int i = 0; i < NUM_BANDS; ++i) {
-            const double c = THIRD_OCT_CENTERS[i];
+        auto makeBand = [&](double c, double lo, double hi) {
+            Band b;
             if (c > nyq)
-                continue;
-            Band &b = m_bands[i];
+                return b;
             b.valid = true;
-            const double lo = c * std::pow(2.0, -1.0 / 6.0);
-            const double hi = c * std::pow(2.0, 1.0 / 6.0);
             for (int k = 0; k < nBins; ++k) {
                 const double f = k * df;
                 if (f >= lo && f < hi)
                     b.idx.push_back(k);
             }
             if (b.idx.empty()) {
-                b.nearBin = int(std::lround(c / df));
-                b.nearBin = std::clamp(b.nearBin, 0, nBins - 1);
+                b.nearBin = std::clamp(int(std::lround(c / df)), 0, nBins - 1);
                 b.factor = (hi - lo) / df;
             }
+            return b;
+        };
+        m_bands.assign(NUM_BANDS, Band());
+        for (int i = 0; i < NUM_BANDS; ++i) {
+            const double c = THIRD_OCT_CENTERS[i];
+            m_bands[i] = makeBand(c, c * std::pow(2.0, -1.0 / 6.0),
+                                  c * std::pow(2.0, 1.0 / 6.0));
+        }
+        // Hi-res points: contiguous windows whose edges are the log midpoints
+        // to the neighboring points.
+        const double halfStep = std::pow(1000.0, 0.5 / (HIRES_POINTS - 1));
+        m_hires.assign(HIRES_POINTS, Band());
+        for (int i = 0; i < HIRES_POINTS; ++i) {
+            const double c = hiresFreq(i);
+            m_hires[i] = makeBand(c, c / halfStep, c * halfStep);
         }
         // Reset smoothing state when the spectrum layout changes.
         m_hasFast = m_hasSlow = false;
         m_bandP.assign(NUM_BANDS, kNaN);
+        m_hiresP.assign(HIRES_POINTS, kNaN);
         m_hasBandP = false;
         m_bandPeakDb.clear();
     }
@@ -354,6 +388,7 @@ private:
     std::vector<double> m_wA, m_wC;
     std::vector<double> m_micLin;
     std::vector<Band> m_bands;
+    std::vector<Band> m_hires;
     int m_splLo = 0, m_splHi = 0;
     int m_cachedSr = -1;
     char m_cachedWeighting = 0;
@@ -363,6 +398,7 @@ private:
     double m_leqSum = 0.0;
     qint64 m_leqN = 0;
     std::vector<double> m_bandP;
+    std::vector<double> m_hiresP;
     bool m_hasBandP = false;
     std::vector<double> m_bandPeakDb;
 };
