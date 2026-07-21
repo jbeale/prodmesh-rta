@@ -274,7 +274,9 @@ private:
 class MetricsDialog : public QDialog {
 public:
     MetricsDialog(QWidget *parent, const QStringList &mainIds,
-                  const QStringList &breakoutIds, int shortS, int longS)
+                  const QStringList &breakoutIds, int shortS, int longS,
+                  const QHash<QString, QPair<double, double>> &targets,
+                  int sizeIdx)
         : QDialog(parent) {
         setWindowTitle("Metrics");
         auto *root = new QVBoxLayout(this);
@@ -284,6 +286,7 @@ public:
         grid->addWidget(new QLabel("<b>Metric</b>"), 0, 0);
         grid->addWidget(new QLabel("<b>Top bar</b>"), 0, 1);
         grid->addWidget(new QLabel("<b>Breakout</b>"), 0, 2);
+        grid->addWidget(new QLabel("<b>Target range</b>"), 0, 3);
         int row = 1;
         for (const MetricInfo &mi : kMetricInfos) {
             grid->addWidget(new QLabel(mi.name), row, 0);
@@ -293,7 +296,29 @@ public:
             cb->setChecked(breakoutIds.contains(mi.id));
             grid->addWidget(cm, row, 1, Qt::AlignHCenter);
             grid->addWidget(cb, row, 2, Qt::AlignHCenter);
-            m_rows.push_back({mi.id, cm, cb});
+
+            Row r{mi.id, cm, cb, new QCheckBox, makeSpin(), makeSpin()};
+            const auto it = targets.constFind(mi.id);
+            if (it != targets.constEnd()) {
+                r.tgt->setChecked(true);
+                r.lo->setValue(it->first);
+                r.hi->setValue(it->second);
+            }
+            r.lo->setEnabled(r.tgt->isChecked());
+            r.hi->setEnabled(r.tgt->isChecked());
+            connect(r.tgt, &QCheckBox::toggled, this,
+                    [lo = r.lo, hi = r.hi](bool on) {
+                        lo->setEnabled(on);
+                        hi->setEnabled(on);
+                    });
+            auto *box = new QHBoxLayout;
+            box->setSpacing(4);
+            box->addWidget(r.tgt);
+            box->addWidget(r.lo);
+            box->addWidget(new QLabel("–"));
+            box->addWidget(r.hi);
+            grid->addLayout(box, row, 3);
+            m_rows.push_back(r);
             ++row;
         }
         grid->addWidget(new QLabel("SPL history sparkline"), row, 0);
@@ -313,11 +338,18 @@ public:
             m_longCombo->addItem(windowLabel(s), s);
         selectData(m_longCombo, longS);
         form->addRow("Long Leq window:", m_longCombo);
+        m_sizeCombo = new QComboBox;
+        m_sizeCombo->addItems({"Small", "Medium", "Large"});
+        m_sizeCombo->setCurrentIndex(std::clamp(sizeIdx, 0, 2));
+        form->addRow("Breakout number size:", m_sizeCombo);
         root->addLayout(form);
 
         auto *hint = new QLabel(
             "Session metrics (Leq, L10/L50/L90, dose) reset with the Reset\n"
-            "button. Dose assumes the Cal offset gives true dB SPL.");
+            "button. Dose assumes the Cal offset gives true dB SPL.\n"
+            "Target ranges draw a gauge under the readout: green in the\n"
+            "band, amber outside. E.g. C-A ratio 8–12 dB keeps low-end\n"
+            "energy in the range that avoids \"it's too loud\" complaints.");
         hint->setStyleSheet("color:#8a92a6; font-size:11px;");
         root->addWidget(hint);
 
@@ -348,6 +380,15 @@ public:
 
     int shortSecs() const { return m_shortCombo->currentData().toInt(); }
     int longSecs() const { return m_longCombo->currentData().toInt(); }
+    int sizeIdx() const { return m_sizeCombo->currentIndex(); }
+
+    QHash<QString, QPair<double, double>> targets() const {
+        QHash<QString, QPair<double, double>> out;
+        for (const Row &r : m_rows)
+            if (r.tgt->isChecked() && r.hi->value() > r.lo->value())
+                out.insert(r.id, {r.lo->value(), r.hi->value()});
+        return out;
+    }
 
 private:
     static void selectData(QComboBox *combo, int value) {
@@ -356,15 +397,27 @@ private:
             combo->setCurrentIndex(i);
     }
 
+    static QDoubleSpinBox *makeSpin() {
+        auto *s = new QDoubleSpinBox;
+        s->setRange(-20.0, 140.0);
+        s->setDecimals(1);
+        s->setFixedWidth(72);
+        return s;
+    }
+
     struct Row {
         QString id;
         QCheckBox *main;
         QCheckBox *brk;
+        QCheckBox *tgt;
+        QDoubleSpinBox *lo;
+        QDoubleSpinBox *hi;
     };
     std::vector<Row> m_rows;
     QCheckBox *m_sparkCheck;
     QComboBox *m_shortCombo;
     QComboBox *m_longCombo;
+    QComboBox *m_sizeCombo;
 };
 
 // ---------------------------------------------------------------------------
@@ -817,13 +870,15 @@ private:
 
     void showMetricsSettings() {
         MetricsDialog dlg(this, m_mainMetrics, m_breakoutMetrics, m_leqShortS,
-                          m_leqLongS);
+                          m_leqLongS, m_targets, m_breakoutSizeIdx);
         if (dlg.exec() != QDialog::Accepted)
             return;
         m_mainMetrics = dlg.mainIds();
         m_breakoutMetrics = dlg.breakoutIds();
         m_leqShortS = dlg.shortSecs();
         m_leqLongS = dlg.longSecs();
+        m_targets = dlg.targets();
+        m_breakoutSizeIdx = dlg.sizeIdx();
         applyMetricsConfig();
         saveSettings();
     }
@@ -832,7 +887,13 @@ private:
         m_metricsEng.shortWindowS = m_leqShortS;
         m_metricsEng.longWindowS = m_leqLongS;
         rebuildReadouts();
+        static constexpr int kValuePt[] = {22, 32, 44};
+        m_breakout->setValueSize(kValuePt[std::clamp(m_breakoutSizeIdx, 0, 2)]);
         m_breakout->setTiles(m_breakoutMetrics);
+    }
+
+    QPair<double, double> targetFor(const QString &id) const {
+        return m_targets.value(id, {kNaN, kNaN});
     }
 
     void showAlarmSettings() {
@@ -932,6 +993,8 @@ private:
         int idx = 0;
         for (const QString &id : m_mainMetrics) {
             auto *r = new SplReadout(metricCaption(id));
+            const auto t = targetFor(id);
+            r->setTarget(t.first, t.second);
             m_splRow->insertWidget(idx++, r);
             m_readouts.push_back({id, r});
         }
@@ -982,8 +1045,10 @@ private:
         for (const QString &id : ids) {
             if (id == "spark")
                 continue;
+            const auto t = targetFor(id);
             out.push_back({id, metricCaption(id), metricValue(id, mv),
-                           metricSuffix(id), alarmStateFor(id, mv)});
+                           metricSuffix(id), alarmStateFor(id, mv), t.first,
+                           t.second});
         }
         return out;
     }
@@ -1063,10 +1128,25 @@ private:
                 .toStringList();
         m_leqShortS = st.value("leqShortS", 60).toInt();
         m_leqLongS = st.value("leqLongS", 900).toInt();
+        m_breakoutSizeIdx = std::clamp(st.value("breakoutSize", 1).toInt(), 0, 2);
         m_alarmEnabled = st.value("alarmEnabled", false).toBool();
         m_alarmMetric = st.value("alarmMetric", "las").toString();
         m_alarmWarn = st.value("alarmWarn", 96.0).toDouble();
         m_alarmAlert = st.value("alarmAlert", 102.0).toDouble();
+        // Target bands as "id:lo:hi". Default: C-A ratio 8–12 dB, the range
+        // that keeps low-end energy below the "it's too loud" zone.
+        m_targets.clear();
+        const QStringList tgts =
+            st.value("metricTargets", QStringList{"ca:8:12"}).toStringList();
+        for (const QString &t : tgts) {
+            const QStringList p = t.split(':');
+            if (p.size() != 3)
+                continue;
+            bool okL = false, okH = false;
+            const double lo = p[1].toDouble(&okL), hi = p[2].toDouble(&okH);
+            if (okL && okH && hi > lo)
+                m_targets.insert(p[0], {lo, hi});
+        }
         applyMetricsConfig();
         if (st.value("breakoutOpen", false).toBool())
             m_breakoutAct->setChecked(true);  // toggled handler shows it
@@ -1100,10 +1180,18 @@ private:
         st.setValue("metricsBreakout", m_breakoutMetrics);
         st.setValue("leqShortS", m_leqShortS);
         st.setValue("leqLongS", m_leqLongS);
+        st.setValue("breakoutSize", m_breakoutSizeIdx);
         st.setValue("alarmEnabled", m_alarmEnabled);
         st.setValue("alarmMetric", m_alarmMetric);
         st.setValue("alarmWarn", m_alarmWarn);
         st.setValue("alarmAlert", m_alarmAlert);
+        QStringList tgts;
+        for (auto it = m_targets.constBegin(); it != m_targets.constEnd(); ++it)
+            tgts << QString("%1:%2:%3")
+                        .arg(it.key())
+                        .arg(it->first)
+                        .arg(it->second);
+        st.setValue("metricTargets", tgts);
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
         st.setValue("inputChannel", m_inputChannel);
@@ -1300,12 +1388,16 @@ private:
         snap.alarmState = alarmState;
         snap.alarmWarn = m_alarmWarn;
         snap.alarmAlert = m_alarmAlert;
+        snap.targets.clear();
+        for (auto it = m_targets.constBegin(); it != m_targets.constEnd();
+             ++it)
+            snap.targets.push_back({it.key(), it->first, it->second});
         m_api->setSnapshot(snap);
         logTick(now, mv, alarmState);
         if (now - m_lastHistPush >= 1000) {
             m_lastHistPush = now;
             m_api->pushHistory(
-                {now, res.fast + cal, res.slow + cal, res.leq + cal});
+                {now, res.fast + cal, res.slow + cal, res.leq + cal, mv.ca});
         }
         // -UPDATE_MS/2: the check runs on the tick grid, so without slack a
         // 100 ms interval lands on alternating 100/150 ms ticks (~8 Hz).
@@ -1335,6 +1427,8 @@ private:
     QString m_alarmMetric = "las";
     double m_alarmWarn = 96.0;
     double m_alarmAlert = 102.0;
+    QHash<QString, QPair<double, double>> m_targets;  // id -> {lo, hi} dB
+    int m_breakoutSizeIdx = 1;  // 0 small, 1 medium, 2 large
     QAction *m_logAct = nullptr;
     QFile m_logFile;
     qint64 m_lastLogMs = 0;

@@ -633,6 +633,66 @@ inline const char *alarmColor(int state) {
     return state >= 2 ? "#e05c5c" : state == 1 ? "#e8c84b" : "#e8ecf4";
 }
 
+// Peloton-style target range gauge: a track with the target band
+// highlighted and a marker at the current value — green inside the band,
+// amber outside (clamped to the ends so direction stays visible). The
+// track spans one extra band-width either side of the target.
+class TargetGauge : public QWidget {
+public:
+    TargetGauge() {
+        setFixedHeight(10);
+        hide();  // shown once a band is set
+    }
+
+    void setBand(double lo, double hi) {
+        if (lo == m_lo && hi == m_hi)
+            return;
+        m_lo = lo;
+        m_hi = hi;
+        const bool on = std::isfinite(lo) && std::isfinite(hi) && hi > lo;
+        setVisible(on);
+        if (on)
+            setToolTip(QString("Target %1 – %2")
+                           .arg(lo, 0, 'f', 1)
+                           .arg(hi, 0, 'f', 1));
+        update();
+    }
+
+    void setValue(double v) {
+        m_val = v;
+        if (isVisible())
+            update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        if (!std::isfinite(m_lo) || !std::isfinite(m_hi) || m_hi <= m_lo)
+            return;
+        QPainter qp(this);
+        qp.setRenderHint(QPainter::Antialiasing);
+        const double pad = m_hi - m_lo;
+        const double lo = m_lo - pad, hi = m_hi + pad;
+        const double y = height() / 2.0;
+        auto xOf = [&](double v) {
+            return 4.0 + (width() - 8.0) *
+                             std::clamp((v - lo) / (hi - lo), 0.0, 1.0);
+        };
+        qp.setPen(QPen(theme::grid, 2, Qt::SolidLine, Qt::RoundCap));
+        qp.drawLine(QPointF(xOf(lo), y), QPointF(xOf(hi), y));
+        qp.setPen(QPen(theme::faint, 4, Qt::SolidLine, Qt::RoundCap));
+        qp.drawLine(QPointF(xOf(m_lo), y), QPointF(xOf(m_hi), y));
+        if (std::isfinite(m_val)) {
+            const bool in = m_val >= m_lo && m_val <= m_hi;
+            qp.setPen(Qt::NoPen);
+            qp.setBrush(in ? theme::bar : theme::peak);
+            qp.drawEllipse(QPointF(xOf(m_val), y), 3.5, 3.5);
+        }
+    }
+
+private:
+    double m_lo = kNaN, m_hi = kNaN, m_val = kNaN;
+};
+
 class SplReadout : public QWidget {
 public:
     explicit SplReadout(const QString &caption) {
@@ -651,6 +711,8 @@ public:
         m_val->setMinimumWidth(120);
         lay->addWidget(m_cap);
         lay->addWidget(m_val);
+        m_gauge = new TargetGauge;
+        lay->addWidget(m_gauge);
     }
 
     void set(const QString &caption, double value,
@@ -659,7 +721,10 @@ public:
         m_val->setText(std::isfinite(value)
                            ? QString::number(value, 'f', 1) + suffix
                            : QString("--.-"));
+        m_gauge->setValue(value);
     }
+
+    void setTarget(double lo, double hi) { m_gauge->setBand(lo, hi); }
 
     void setAlarmState(int state) {
         if (state == m_alarm)
@@ -671,6 +736,7 @@ public:
 private:
     QLabel *m_cap;
     QLabel *m_val;
+    TargetGauge *m_gauge;
     int m_alarm = 0;
 };
 
@@ -681,6 +747,7 @@ struct MetricDisplay {
     double value = kNaN;
     QString suffix;  // e.g. "%" for dose metrics
     int alarm = 0;   // 0 normal, 1 warning, 2 alert
+    double tgtLo = kNaN, tgtHi = kNaN;  // target band; NaN = no target
 };
 
 // ---------------------------------------------------------------------------
@@ -727,6 +794,8 @@ public:
         m_max->onClick = [this] { resetMax(); };
         lay->addWidget(m_cap);
         lay->addWidget(m_val);
+        m_gauge = new TargetGauge;
+        lay->addWidget(m_gauge);
         lay->addWidget(m_max);
     }
 
@@ -734,10 +803,19 @@ public:
         m_cap->setText(caption);
         m_suffix = suffix;
         m_val->setText(fmt(v) + (std::isfinite(v) ? suffix : QString()));
+        m_gauge->setValue(v);
         if (std::isfinite(v) && (!std::isfinite(m_maxVal) || v > m_maxVal)) {
             m_maxVal = v;
             m_max->setText("MAX " + fmt(m_maxVal) + suffix);
         }
+    }
+
+    void setTarget(double lo, double hi) { m_gauge->setBand(lo, hi); }
+
+    void setValueSize(int pt) {
+        QFont f = m_val->font();
+        f.setPointSize(pt);
+        m_val->setFont(f);
     }
 
     void setAlarmState(int state) {
@@ -762,6 +840,7 @@ private:
     QString m_suffix;
     QLabel *m_cap;
     QLabel *m_val;
+    TargetGauge *m_gauge;
     ClickableLabel *m_max;
     int m_alarm = 0;
 };
@@ -890,10 +969,18 @@ public:
                 m_tilesLay->addWidget(m_spark);
             } else {
                 auto *t = new MetricTile;
+                t->setValueSize(m_valuePt);
                 m_tiles.insert(id, t);
                 m_tilesLay->addWidget(t);
             }
         }
+    }
+
+    void setValueSize(int pt) {
+        m_valuePt = pt;
+        for (MetricTile *t : m_tiles)
+            t->setValueSize(pt);
+        adjustSize();  // let the window shrink when the numbers do
     }
 
     void updateMetrics(const std::vector<MetricDisplay> &vals) {
@@ -901,6 +988,7 @@ public:
             if (MetricTile *t = m_tiles.value(v.id)) {
                 t->set(v.caption, v.value, v.suffix);
                 t->setAlarmState(v.alarm);
+                t->setTarget(v.tgtLo, v.tgtHi);
             }
     }
 
@@ -930,4 +1018,5 @@ private:
     QHash<QString, MetricTile *> m_tiles;
     SparkTile *m_spark = nullptr;
     QCheckBox *m_onTop;
+    int m_valuePt = 32;
 };

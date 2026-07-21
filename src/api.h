@@ -56,10 +56,17 @@ public:
         QString alarmMetric;
         int alarmState = 0;  // 0 ok, 1 warning, 2 alert
         double alarmWarn = 0.0, alarmAlert = 0.0;
+        // Per-metric target bands (id, lo dB, hi dB).
+        struct Target {
+            QString id;
+            double lo, hi;
+        };
+        std::vector<Target> targets;
     };
     struct HistSample {
         qint64 t = 0;
         double fast = kNaN, slow = kNaN, leq = kNaN;  // dB SPL
+        double ca = kNaN;  // C-A ratio (LF-energy trend over time)
     };
 
     explicit ApiServer(QObject *parent = nullptr) : QObject(parent) {
@@ -149,7 +156,15 @@ private:
                  m_snap.peaks.empty() ? QJsonValue() : jarr(m_snap.peaks));
         o.insert("metrics", metricsJson());
         o.insert("alarm", alarmJson());
+        o.insert("targets", targetsJson());
         return o;
+    }
+
+    QJsonObject targetsJson() const {
+        QJsonObject t;
+        for (const auto &tg : m_snap.targets)
+            t.insert(tg.id, QJsonObject{{"lo_db", tg.lo}, {"hi_db", tg.hi}});
+        return t;
     }
 
     QJsonObject metricsJson() const {
@@ -365,6 +380,7 @@ private:
                 {"leq_db", jnum(m_snap.leq)},
                 {"metrics", metricsJson()},
                 {"alarm", alarmJson()},
+                {"targets", targetsJson()},
             });
         }
         if (path == "/api/rta") {
@@ -388,6 +404,7 @@ private:
                     {"fast_db", jnum(it->fast)},
                     {"slow_db", jnum(it->slow)},
                     {"leq_db", jnum(it->leq)},
+                    {"ca_db", jnum(it->ca)},
                 });
             }
             return QJsonDocument(QJsonObject{

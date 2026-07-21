@@ -48,6 +48,14 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
   .tile .val.alert { color: var(--alert); }
   .gridrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
              gap: 10px; margin-bottom: 14px; }
+  .gauge { position: relative; height: 8px; margin-top: 6px; display: none; }
+  .gauge .track { position: absolute; left: 0; right: 0; top: 3px; height: 2px;
+                  background: var(--grid); border-radius: 1px; }
+  .gauge .band { position: absolute; top: 2px; height: 4px;
+                 background: #3a6b5f; border-radius: 2px; }
+  .gauge .dot { position: absolute; top: 0; width: 8px; height: 8px;
+                border-radius: 50%; background: var(--bar); margin-left: -4px; }
+  .gauge .dot.out { background: var(--warn); }
   #rtabox { background: var(--panel); border: 1px solid var(--border);
             border-radius: 8px; padding: 10px; }
   #rtabox .cap { font-size: 11px; color: var(--dim); margin-bottom: 6px; }
@@ -86,17 +94,48 @@ function fmt(v, id) {
   if (v === null || v === undefined || !isFinite(v)) return "--.-";
   return v.toFixed(1) + (id === "doseN" || id === "doseO" ? "%" : "");
 }
+const GAUGE =
+  `<div class="gauge" id="g-ID"><div class="track"></div>` +
+  `<div class="band" id="gb-ID"></div><div class="dot" id="gd-ID"></div></div>`;
 function makeTiles() {
   for (const id of BIG)
     document.getElementById("bigrow").insertAdjacentHTML("beforeend",
       `<div class="tile"><div class="cap" id="cap-${id}"></div>` +
-      `<div class="val" id="val-${id}">--.-</div></div>`);
+      `<div class="val" id="val-${id}">--.-</div>` +
+      GAUGE.replaceAll("ID", id) + `</div>`);
   for (const id of SMALL)
     document.getElementById("gridrow").insertAdjacentHTML("beforeend",
       `<div class="tile"><div class="cap" id="cap-${id}"></div>` +
-      `<div class="val small" id="val-${id}">--.-</div></div>`);
+      `<div class="val small" id="val-${id}">--.-</div>` +
+      GAUGE.replaceAll("ID", id) + `</div>`);
 }
 makeTiles();
+
+// Peloton-style target gauges: band = target range, dot = current value
+// (green in band, amber outside; track spans one band-width either side).
+function setGauges(m, targets) {
+  for (const id of BIG.concat(SMALL)) {
+    const g = document.getElementById("g-" + id);
+    const t = targets ? targets[id] : null;
+    if (!t) { g.style.display = "none"; continue; }
+    g.style.display = "block";
+    const pad = t.hi_db - t.lo_db;
+    const lo = t.lo_db - pad, hi = t.hi_db + pad;
+    const pct = v => Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100));
+    const band = document.getElementById("gb-" + id);
+    band.style.left = pct(t.lo_db) + "%";
+    band.style.width = (pct(t.hi_db) - pct(t.lo_db)) + "%";
+    const dot = document.getElementById("gd-" + id);
+    const v = m[id];
+    if (v === null || v === undefined || !isFinite(v)) {
+      dot.style.display = "none";
+      continue;
+    }
+    dot.style.display = "block";
+    dot.style.left = pct(v) + "%";
+    dot.className = "dot" + (v >= t.lo_db && v <= t.hi_db ? "" : " out");
+  }
+}
 
 function setAlarmUi(alarm) {
   const banner = document.getElementById("alarmbanner");
@@ -182,6 +221,7 @@ function connect() {
       document.getElementById("val-" + id).textContent = fmt(m[id], id);
     }
     setAlarmUi(d.alarm);
+    setGauges(m, d.targets);
     drawRta(d);
     document.getElementById("rtacap").textContent =
       "RTA — 1/3 OCTAVE (" + w + "-WEIGHTED, dB SPL)";
