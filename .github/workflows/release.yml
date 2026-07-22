@@ -104,11 +104,26 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
             -P "$CERT_PASSWORD" -T /usr/bin/codesign
           rm "$RUNNER_TEMP/cert.p12"
+          # GitHub runners lack Apple's Developer ID G2 intermediate, so the
+          # identity can't build its trust chain and find-identity -v hides
+          # it. Import the (public) intermediate alongside the cert.
+          curl -sSf -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
           # Allow codesign to use the key without a UI prompt (headless CI)
           security set-key-partition-list -S apple-tool:,apple: \
             -k "$KEYCHAIN_PW" "$KEYCHAIN" > /dev/null
           security list-keychains -d user -s "$KEYCHAIN" login.keychain
           echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          # Fail here, with the evidence, rather than at the codesign call:
+          # "Matching" but no "valid" identity → broken trust chain;
+          # no "Matching" identity at all → p12 lacks the private key.
+          security find-identity -p codesigning "$KEYCHAIN"
+          security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -q "Developer ID Application" || {
+              echo "::error::No valid Developer ID Application identity after import."
+              exit 1
+            }
 
       - name: Package (macdeployqt + sign + notarize)
         id: pkg
