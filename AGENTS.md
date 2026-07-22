@@ -80,3 +80,11 @@ Bump `VERSION` in CMakeLists.txt, commit, then `git tag vX.Y.Z && git push
 origin vX.Y.Z`. The release workflow verifies the tag matches the CMake
 version, builds, selftests, and publishes zips. Hyphenated tags (v1.0-rc1)
 publish as pre-releases. Plain pushes never release.
+
+macOS release builds are Developer ID-signed and notarized when the repo
+secrets `MACOS_CERT_P12`, `MACOS_CERT_P12_PASSWORD`, `APPLE_API_KEY_ID`,
+`APPLE_API_ISSUER_ID`, and `APPLE_API_KEY_P8` are set (forks without them
+fall back to ad-hoc signing). Notarization forces the hardened runtime, so
+mic capture needs `macos/entitlements.plist` (audio-input) — keep it in the
+codesign invocation or notarized builds record silence. Never commit
+certificates or keys; they live only in GitHub Actions secrets.
