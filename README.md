@@ -2,6 +2,10 @@
 
 [![build](https://github.com/jbeale/prodmesh-rta/actions/workflows/build.yml/badge.svg)](https://github.com/jbeale/prodmesh-rta/actions/workflows/build.yml)
 
+![Hi-res RTA line view with hover readout](docs/screenshot-rta.png)
+
+![Spectrogram with the metric breakout window](docs/screenshot-spectro-breakout.png)
+
 A minimal, free, cross-platform (Windows / macOS) SPL meter and spectrum
 analyzer, part of the ProdMesh production toolkit: point it at any microphone
 input and get

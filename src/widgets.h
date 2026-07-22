@@ -525,6 +525,8 @@ private:
 
 // ---------------------------------------------------------------------------
 // Strip chart of the last 10 minutes of SPL (Fast faint, Slow bright).
+// Autoscales to the data (minimum 20 dB span) — a fixed cal-anchored range
+// flatlines the trace when the calibration has lots of headroom.
 
 class HistoryWidget : public QWidget {
 public:
@@ -543,7 +545,7 @@ public:
     }
 
     void setRange(double yMin, double yMax) {
-        m_yMin = yMin;
+        m_yMin = yMin;  // fallback range until there is data to scale to
         m_yMax = yMax;
     }
 
@@ -556,13 +558,31 @@ protected:
         const int h = height() - top - bottom;
         if (w <= 10 || h <= 10)
             return;
-        const double span = m_yMax - m_yMin;
+
+        double yMin = m_yMin, yMax = m_yMax;
+        double lo = 1e300, hi = -1e300;
+        for (const Pt &p : m_pts) {
+            for (double v : {p.fast, p.slow}) {
+                if (!std::isfinite(v))
+                    continue;
+                lo = std::min(lo, v);
+                hi = std::max(hi, v);
+            }
+        }
+        if (lo <= hi) {
+            const double mid = (lo + hi) / 2;
+            const double span = std::max(hi - lo + 6.0, 20.0);
+            yMin = mid - span / 2;
+            yMax = mid + span / 2;
+        }
+        const double span = yMax - yMin;
+        const double step = span <= 50.0 ? 10.0 : 20.0;
 
         QFont f = font();
         f.setPointSize(8);
         qp.setFont(f);
-        for (double g = std::ceil(m_yMin / 20.0) * 20.0; g <= m_yMax; g += 20.0) {
-            const int y = int(top + h * (1.0 - (g - m_yMin) / span));
+        for (double g = std::ceil(yMin / step) * step; g <= yMax; g += step) {
+            const int y = int(top + h * (1.0 - (g - yMin) / span));
             qp.setPen(QPen(theme::grid, 1));
             qp.drawLine(left, y, left + w, y);
             qp.setPen(theme::text);
@@ -582,7 +602,8 @@ protected:
                 return left + w * (1.0 - double(now - t) / SPAN_MS);
             };
             auto yOf = [&](double db) {
-                return top + h * (1.0 - (std::clamp(db, m_yMin, m_yMax) - m_yMin) / span);
+                return top +
+                       h * (1.0 - (std::clamp(db, yMin, yMax) - yMin) / span);
             };
             drawSeries(qp, xOf, yOf, /*fast=*/true, QPen(theme::faint, 1));
             drawSeries(qp, xOf, yOf, /*fast=*/false, QPen(theme::barTop, 2));

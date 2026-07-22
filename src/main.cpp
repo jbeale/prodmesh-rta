@@ -644,6 +644,24 @@ public:
             "Bands rise instantly and fall at this rate.");
         rtaCtl->addWidget(m_rtaDecayCombo);
         rtaCtl->addSpacing(12);
+        rtaCtl->addWidget(new QLabel("Range:"));
+        m_rtaRangeCombo = new QComboBox;
+        m_rtaRangeCombo->addItems({"40 dB", "60 dB", "80 dB", "100 dB"});
+        m_rtaRangeCombo->setCurrentIndex(2);
+        m_rtaRangeCombo->setToolTip("Vertical span of the RTA scale.");
+        rtaCtl->addWidget(m_rtaRangeCombo);
+        rtaCtl->addSpacing(12);
+        rtaCtl->addWidget(new QLabel("Sens:"));
+        m_rtaSensSpin = new QSpinBox;
+        m_rtaSensSpin->setRange(-20, 60);
+        m_rtaSensSpin->setValue(0);
+        m_rtaSensSpin->setSuffix(" dB");
+        m_rtaSensSpin->setToolTip(
+            "Shifts the scale down so quieter band levels fill the plot.\n"
+            "Per-band levels sit ~15 dB below the broadband SPL (pink noise\n"
+            "spreads across ~31 bands), so 10-20 dB here is typical.");
+        rtaCtl->addWidget(m_rtaSensSpin);
+        rtaCtl->addSpacing(12);
         m_peakCheck = new QCheckBox("Peak hold");
         rtaCtl->addWidget(m_peakCheck);
         rtaCtl->addStretch(1);
@@ -738,6 +756,10 @@ public:
                              m_rta->setDecayRate(rtaDecayRate(i));
                              saveSettings();
                          });
+        QObject::connect(m_rtaRangeCombo, &QComboBox::currentIndexChanged,
+                         this, [this](int) { saveSettings(); });
+        QObject::connect(m_rtaSensSpin, &QSpinBox::valueChanged, this,
+                         [this](int) { saveSettings(); });
         QObject::connect(m_spectroThemeCombo, &QComboBox::currentIndexChanged,
                          this, [this](int i) {
                              m_spectro->setTheme(i);
@@ -1156,6 +1178,9 @@ private:
             std::clamp(st.value("rtaView", 0).toInt(), 0, 1));
         m_rtaDecayCombo->setCurrentIndex(
             std::clamp(st.value("rtaDecay", 0).toInt(), 0, 3));
+        m_rtaRangeCombo->setCurrentIndex(
+            std::clamp(st.value("rtaRange", 2).toInt(), 0, 3));
+        m_rtaSensSpin->setValue(st.value("rtaSens", 0).toInt());
         m_rta->setViewMode(m_rtaViewCombo->currentIndex());
         m_rta->setDecayRate(rtaDecayRate(m_rtaDecayCombo->currentIndex()));
         m_breakout->setAlwaysOnTop(st.value("breakoutOnTop", false).toBool());
@@ -1216,6 +1241,8 @@ private:
         st.setValue("spectroSens", m_spectroSensSpin->value());
         st.setValue("rtaView", m_rtaViewCombo->currentIndex());
         st.setValue("rtaDecay", m_rtaDecayCombo->currentIndex());
+        st.setValue("rtaRange", m_rtaRangeCombo->currentIndex());
+        st.setValue("rtaSens", m_rtaSensSpin->value());
         st.setValue("breakoutOpen", m_breakout->isVisible());
         st.setValue("breakoutOnTop", m_breakout->alwaysOnTop());
         st.setValue("breakoutGeo", m_breakout->saveGeometry());
@@ -1346,6 +1373,11 @@ private:
         }
     }
 
+    static double rtaRange(int idx) {
+        static const double ranges[] = {40.0, 60.0, 80.0, 100.0};
+        return ranges[std::clamp(idx, 0, 3)];
+    }
+
     static double spectroRange(int idx) {
         static const double ranges[] = {60.0, 80.0, 100.0, 120.0};
         return ranges[std::clamp(idx, 0, 3)];
@@ -1410,9 +1442,13 @@ private:
             p += cal;
         for (double &v : res.hires)
             v += cal;
-        // Scale tops out at cal = SPL at 0 dBFS; the input clips there, so
-        // anything above it is unreachable.
-        m_rta->setData(res.bands, res.hires, res.peaks, cal - 80.0, cal, dt);
+        // Scale tops out at cal = SPL at 0 dBFS (the clip point), minus the
+        // sensitivity shift: per-band levels run well below broadband SPL,
+        // and high-headroom calibrations push them further down still.
+        const double rtaTop = cal - m_rtaSensSpin->value();
+        m_rta->setData(res.bands, res.hires, res.peaks,
+                       rtaTop - rtaRange(m_rtaRangeCombo->currentIndex()),
+                       rtaTop, dt);
         m_spectro->pushColumn(m_analyzer.lastPower(), m_analyzer.binWidth());
         m_breakout->updateMetrics(buildDisplays(m_breakoutMetrics, mv));
 
@@ -1500,6 +1536,8 @@ private:
     QComboBox *m_avgCombo;
     QComboBox *m_rtaViewCombo;
     QComboBox *m_rtaDecayCombo;
+    QComboBox *m_rtaRangeCombo;
+    QSpinBox *m_rtaSensSpin;
     QComboBox *m_spectroThemeCombo;
     QComboBox *m_spectroRangeCombo;
     QSpinBox *m_spectroSensSpin;
