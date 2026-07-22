@@ -100,6 +100,19 @@ public:
     // rate once the level drops. 0 disables (display follows the data).
     void setDecayRate(double dbPerSec) { m_decay = dbPerSec; }
 
+    void setFreqGridlines(bool on) {
+        m_freqGrid = on;
+        update();
+    }
+
+    // Split-view cursor link: reports the hovered frequency (NaN when the
+    // mouse leaves) and mirrors the partner widget's cursor as a line.
+    std::function<void(double)> onHoverFreq;
+    void setLinkedCursor(double freqHz) {
+        m_linkFreq = freqHz;
+        update();
+    }
+
     void setData(const std::vector<double> &bands,
                  const std::vector<double> &hires,
                  const std::vector<double> &peaks, double yMin, double yMax,
@@ -115,12 +128,14 @@ public:
 protected:
     void mouseMoveEvent(QMouseEvent *e) override {
         m_mouse = e->position().toPoint();
+        emitHover();
         update();
         QWidget::mouseMoveEvent(e);
     }
 
     void leaveEvent(QEvent *e) override {
         m_mouse = QPoint(-1, -1);
+        emitHover();
         update();
         QWidget::leaveEvent(e);
     }
@@ -128,7 +143,7 @@ protected:
     void paintEvent(QPaintEvent *) override {
         QPainter qp(this);
         qp.fillRect(rect(), theme::bg);
-        const int left = 40, right = 10, top = 10, bottom = 24;
+        const int left = kLeft, right = kRight, top = kTop, bottom = kBottom;
         const int w = width() - left - right;
         const int h = height() - top - bottom;
         if (w <= 10 || h <= 10)
@@ -157,6 +172,12 @@ protected:
         for (int i = 0; i < NUM_BANDS; ++i) {
             const QString lbl = xAxisLabel(THIRD_OCT_CENTERS[i]);
             if (!lbl.isEmpty()) {
+                if (m_freqGrid) {
+                    qp.setPen(
+                        QPen(QColor(255, 255, 255, 40), 1, Qt::DotLine));
+                    const int x = int(left + (i + 0.5) * slot);
+                    qp.drawLine(x, top, x, top + h);
+                }
                 qp.setPen(theme::text);
                 qp.drawText(QRect(int(left + i * slot - slot),
                                   height() - bottom + 4, int(slot * 3), 16),
@@ -275,10 +296,32 @@ protected:
                           .arg(level, 0, 'f', 1)
                     : fmtFreq(f);
             drawHoverLabel(qp, txt, m_mouse, left, w, top);
+        } else if (std::isfinite(m_linkFreq)) {
+            // Mirrored cursor from the split-view partner plot.
+            const int x = int(left + slot * slotOfFreq(m_linkFreq));
+            if (x >= left && x <= left + w) {
+                qp.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt::DashLine));
+                qp.drawLine(x, top, x, top + h);
+            }
         }
     }
 
 private:
+    static constexpr int kLeft = 40, kRight = 10, kTop = 10, kBottom = 24;
+
+    void emitHover() {
+        if (!onHoverFreq)
+            return;
+        const int w = width() - kLeft - kRight;
+        const int h = height() - kTop - kBottom;
+        double f = kNaN;
+        if (w > 10 && h > 10 && m_mouse.x() >= kLeft &&
+            m_mouse.x() <= kLeft + w && m_mouse.y() >= kTop &&
+            m_mouse.y() <= kTop + h)
+            f = freqOfSlot((m_mouse.x() - kLeft) * NUM_BANDS / double(w));
+        onHoverFreq(f);
+    }
+
     // Log-frequency slot coordinate: 20 Hz -> slot 0.5 and 20 kHz -> slot
     // 30.5, matching the 1/3-octave bar centers at both ends.
     static double slotOfFreq(double f) {
@@ -311,6 +354,8 @@ private:
     double m_yMin = 20.0, m_yMax = 120.0;
     int m_mode = 0;
     double m_decay = 0.0;
+    bool m_freqGrid = false;
+    double m_linkFreq = kNaN;
     QPoint m_mouse{-1, -1};
 };
 
@@ -331,7 +376,9 @@ public:
           m_vals(size_t(COLS) * ROWS, kEmpty) {
         rebuildLut();
         m_img.fill(m_lut[0]);
-        setMinimumHeight(240);
+        // Low enough that the stacked Split tab doesn't inflate the whole
+        // window's minimum size (QTabWidget sizes to its largest page).
+        setMinimumHeight(120);
         setMouseTracking(true);  // hover frequency cursor
     }
 
@@ -358,8 +405,50 @@ public:
         recolor();
     }
 
+    // Split view: frequency on X (sharing the RTA's log axis) and time on
+    // Y, newest at the bottom flowing upward. Same history buffer — the
+    // image is just rendered rotated, so switching modes keeps the past.
+    void setVertical(bool v) {
+        if (m_vertical != v) {
+            m_vertical = v;
+            update();
+        }
+    }
+
+    // Split-view cursor link (vertical mode only — that's when the
+    // frequency axis is horizontal and shared with the RTA above).
+    std::function<void(double)> onHoverFreq;
+    void setLinkedCursor(double freqHz) {
+        m_linkFreq = freqHz;
+        update();
+    }
+
+    // Time the view covers. One column per tick shows 30 s; longer spans
+    // average ticks into each column (nothing dropped), shorter ones zoom
+    // into the newest slice of the buffer.
+    void setSpanSeconds(double s) {
+        const double colS = UPDATE_MS / 1000.0;  // seconds per 1-tick column
+        if (s <= COLS * colS) {
+            m_ticksPerCol = 1;
+            m_colsShown = std::clamp(int(std::lround(s / colS)), 10, COLS);
+        } else {
+            m_ticksPerCol = std::max(
+                1, int(std::lround(s / (COLS * colS))));
+            m_colsShown = COLS;
+        }
+        update();
+    }
+
     void pushColumn(const std::vector<double> &power, double df) {
         if (power.empty() || df <= 0)
+            return;
+        if (m_accum.size() != power.size()) {
+            m_accum.assign(power.size(), 0.0);
+            m_accumN = 0;
+        }
+        for (size_t i = 0; i < power.size(); ++i)
+            m_accum[i] += power[i];
+        if (++m_accumN < m_ticksPerCol)
             return;
         for (int r = 0; r < ROWS; ++r) {
             QRgb *line = reinterpret_cast<QRgb *>(m_img.scanLine(r));
@@ -367,28 +456,32 @@ public:
             float *vals = &m_vals[size_t(r) * COLS];
             std::memmove(vals, vals + 1, (COLS - 1) * sizeof(float));
         }
-        const int n = int(power.size());
+        const int n = int(m_accum.size());
         for (int r = 0; r < ROWS; ++r) {
             const double frac = double(ROWS - 1 - r) / (ROWS - 1);  // 0 bottom
             const double f = 20.0 * std::pow(2.0, frac * OCTAVES);
             int k = int(std::lround(f / df));
             k = std::clamp(k, 0, n - 1);
-            const float v = float(toDb(power[k]));
+            const float v = float(toDb(m_accum[k] / m_accumN));
             m_vals[size_t(r) * COLS + COLS - 1] = v;
             reinterpret_cast<QRgb *>(m_img.scanLine(r))[COLS - 1] = colorFor(v);
         }
+        m_accum.assign(m_accum.size(), 0.0);
+        m_accumN = 0;
         update();
     }
 
 protected:
     void mouseMoveEvent(QMouseEvent *e) override {
         m_mouse = e->position().toPoint();
+        emitHover();
         update();
         QWidget::mouseMoveEvent(e);
     }
 
     void leaveEvent(QEvent *e) override {
         m_mouse = QPoint(-1, -1);
+        emitHover();
         update();
         QWidget::leaveEvent(e);
     }
@@ -396,13 +489,19 @@ protected:
     void paintEvent(QPaintEvent *) override {
         QPainter qp(this);
         qp.fillRect(rect(), theme::bg);
-        const int left = 40, right = 10, top = 10, bottom = 20;
+        const int left = 40, right = 10, top = 10;
+        const int bottom = m_vertical ? 24 : 20;  // match the RTA when stacked
         const int w = width() - left - right;
         const int h = height() - top - bottom;
         if (w <= 10 || h <= 10)
             return;
         qp.setRenderHint(QPainter::SmoothPixmapTransform);
-        qp.drawImage(QRect(left, top, w, h), m_img);
+        if (m_vertical) {
+            paintVertical(qp, left, top, w, h);
+            return;
+        }
+        qp.drawImage(QRect(left, top, w, h), m_img,
+                     QRect(COLS - m_colsShown, 0, m_colsShown, ROWS));
 
         QFont f = font();
         f.setPointSize(8);
@@ -419,9 +518,8 @@ protected:
                                    : QString::number(fr, 'f', 0));
         }
         qp.setPen(theme::text);
-        const double spanS = COLS * UPDATE_MS / 1000.0;
         qp.drawText(QRect(left, height() - bottom + 2, w, 16), Qt::AlignLeft,
-                    QString("-%1 s").arg(spanS, 0, 'f', 0));
+                    spanLabel());
         qp.drawText(QRect(left, height() - bottom + 2, w, 16), Qt::AlignRight,
                     "now");
         qp.setPen(QPen(theme::grid, 1));
@@ -441,6 +539,98 @@ protected:
 
 private:
     static constexpr float kEmpty = -1e9f;
+
+    double spanSeconds() const {
+        return double(m_colsShown) * m_ticksPerCol * UPDATE_MS / 1000.0;
+    }
+
+    void emitHover() {
+        if (!onHoverFreq)
+            return;
+        double f = kNaN;
+        const int left = 40, right = 10, top = 10, bottom = 24;
+        const int w = width() - left - right;
+        const int h = height() - top - bottom;
+        if (m_vertical && w > 10 && h > 10 && m_mouse.x() >= left &&
+            m_mouse.x() <= left + w && m_mouse.y() >= top &&
+            m_mouse.y() <= top + h) {
+            const double s = (m_mouse.x() - left) * NUM_BANDS / double(w);
+            f = std::clamp(
+                20.0 * std::pow(1000.0, (s - 0.5) / (NUM_BANDS - 1)), 20.0,
+                20.0 * std::pow(2.0, OCTAVES));
+        }
+        onHoverFreq(f);
+    }
+    QString spanLabel() const {
+        const double s = spanSeconds();
+        return s < 60 ? QString("-%1 s").arg(s, 0, 'f', 0)
+                      : QString("-%1 min").arg(s / 60.0, 0, 'g', 3);
+    }
+
+    // Split-view rendering: the history image rotated 90° so frequency runs
+    // along X with the RTA's log mapping (20 Hz at slot 0.5, 20 kHz near
+    // slot NUM_BANDS-0.5 — the axes line up when stacked above each other)
+    // and time flows bottom -> up, newest row at the bottom.
+    void paintVertical(QPainter &qp, int left, int top, int w, int h) {
+        const double slot = double(w) / NUM_BANDS;
+        auto xOf = [&](double fr) {
+            return left + slot * (0.5 + (NUM_BANDS - 1) *
+                                            std::log(fr / 20.0) /
+                                            std::log(1000.0));
+        };
+        const double fMax = 20.0 * std::pow(2.0, OCTAVES);
+        const double x0 = xOf(20.0), x1 = xOf(fMax);
+        qp.save();
+        qp.setClipRect(left, top, w, h);
+        qp.translate(x1, top);
+        qp.rotate(90);  // image time axis -> down, frequency axis -> left
+        qp.drawImage(QRectF(0, 0, h, x1 - x0), m_img,
+                     QRectF(COLS - m_colsShown, 0, m_colsShown, ROWS));
+        qp.restore();
+
+        QFont f = font();
+        f.setPointSize(8);
+        qp.setFont(f);
+        for (int i = 0; i < NUM_BANDS; ++i) {
+            const QString lbl = xAxisLabel(THIRD_OCT_CENTERS[i]);
+            if (lbl.isEmpty())
+                continue;
+            const int x = int(left + (i + 0.5) * slot);
+            qp.setPen(QPen(QColor(255, 255, 255, 40), 1, Qt::DotLine));
+            qp.drawLine(x, top, x, top + h);
+            qp.setPen(theme::text);
+            qp.drawText(QRect(int(left + i * slot - slot), top + h + 4,
+                              int(slot * 3), 16),
+                        Qt::AlignHCenter, lbl);
+        }
+        qp.setPen(theme::text);
+        qp.drawText(QRect(0, top, left - 6, 16),
+                    Qt::AlignRight | Qt::AlignVCenter, spanLabel());
+        qp.drawText(QRect(0, top + h - 16, left - 6, 16),
+                    Qt::AlignRight | Qt::AlignVCenter, "now");
+        qp.setPen(QPen(theme::grid, 1));
+        qp.setBrush(Qt::NoBrush);
+        qp.drawRect(left, top, w, h);
+
+        // Hover: vertical cursor labeled with the frequency of that column.
+        if (m_mouse.x() >= left && m_mouse.x() <= left + w &&
+            m_mouse.y() >= top && m_mouse.y() <= top + h) {
+            const double s = (m_mouse.x() - left) / slot;
+            const double fr = std::clamp(
+                20.0 * std::pow(1000.0, (s - 0.5) / (NUM_BANDS - 1)), 20.0,
+                fMax);
+            qp.setPen(QPen(QColor(255, 255, 255, 110), 1, Qt::DashLine));
+            qp.drawLine(m_mouse.x(), top, m_mouse.x(), top + h);
+            drawHoverLabel(qp, fmtFreq(fr), m_mouse, left, w, top);
+        } else if (std::isfinite(m_linkFreq)) {
+            // Mirrored cursor from the split-view partner plot.
+            const int x = int(xOf(m_linkFreq));
+            if (x >= left && x <= left + w) {
+                qp.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt::DashLine));
+                qp.drawLine(x, top, x, top + h);
+            }
+        }
+    }
 
     // Default scale matches the RTA plot: 100 dB of range ending 20 dB above
     // full scale. Sensitivity slides that window down; range shrinks it.
@@ -520,6 +710,12 @@ private:
     int m_theme = 0;
     double m_range = 100.0;
     double m_sens = 0.0;
+    bool m_vertical = false;
+    double m_linkFreq = kNaN;
+    std::vector<double> m_accum;  // power sums for time-span averaging
+    int m_accumN = 0;
+    int m_ticksPerCol = 1;
+    int m_colsShown = COLS;  // < COLS zooms into the newest slice
     QPoint m_mouse{-1, -1};
 };
 

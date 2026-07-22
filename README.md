@@ -18,11 +18,14 @@ input and get
 
 The C++ version additionally has:
 
-- **Spectrogram** — scrolling 30 s log-frequency heat map (tab next to RTA)
-  with selectable color themes, range, and sensitivity, plus a hover
-  frequency cursor
+- **Spectrogram** — scrolling log-frequency heat map (tab next to RTA)
+  with selectable color themes, range, sensitivity, and time span
+  (10 s – 10 min), plus a hover frequency cursor
+- **Split view** — Smaart-style stacked RTA + bottom-up spectrogram
+  sharing the frequency axis, with a linked hover cursor across both
 - **Hi-res RTA line view** — 1/24-octave line spectrum with hover
-  frequency/level readout (bar view snaps to the band)
+  frequency/level readout (bar view snaps to the band); all view options
+  live in **Settings → Display…** and apply live
 - **SPL history strip** — the last 10 minutes of Fast/Slow at a glance
 - **Smaart-style SPL metrics** — rolling LAeq (two configurable windows),
   LZpk/LCpk, C-A ratio, L10/L50/L90, NIOSH/OSHA dose; pick which appear in

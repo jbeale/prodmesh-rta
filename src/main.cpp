@@ -21,6 +21,7 @@
 
 #include <functional>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHostAddress>
 #include <QIcon>
@@ -36,6 +37,7 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QSplitter>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -622,87 +624,21 @@ public:
         auto *rtaPage = new QWidget;
         auto *rtaLay = new QVBoxLayout(rtaPage);
         rtaLay->setContentsMargins(0, 4, 0, 0);
-        rtaLay->setSpacing(4);
-        auto *rtaCtl = new QHBoxLayout;
-        rtaCtl->addSpacing(8);
-        rtaCtl->addWidget(new QLabel("View:"));
-        m_rtaViewCombo = new QComboBox;
-        m_rtaViewCombo->addItems({"Bars", "Line"});
-        rtaCtl->addWidget(m_rtaViewCombo);
-        rtaCtl->addSpacing(12);
-        rtaCtl->addWidget(new QLabel("Avg:"));
-        m_avgCombo = new QComboBox;
-        m_avgCombo->addItems({"Off", "Fast (125 ms)", "Slow (1 s)", "2 s"});
-        m_avgCombo->setCurrentIndex(1);
-        rtaCtl->addWidget(m_avgCombo);
-        rtaCtl->addSpacing(12);
-        rtaCtl->addWidget(new QLabel("Decay:"));
-        m_rtaDecayCombo = new QComboBox;
-        m_rtaDecayCombo->addItems(
-            {"Off", "Slow (6 dB/s)", "Medium (12 dB/s)", "Fast (24 dB/s)"});
-        m_rtaDecayCombo->setToolTip(
-            "Bands rise instantly and fall at this rate.");
-        rtaCtl->addWidget(m_rtaDecayCombo);
-        rtaCtl->addSpacing(12);
-        rtaCtl->addWidget(new QLabel("Range:"));
-        m_rtaRangeCombo = new QComboBox;
-        m_rtaRangeCombo->addItems({"40 dB", "60 dB", "80 dB", "100 dB"});
-        m_rtaRangeCombo->setCurrentIndex(2);
-        m_rtaRangeCombo->setToolTip("Vertical span of the RTA scale.");
-        rtaCtl->addWidget(m_rtaRangeCombo);
-        rtaCtl->addSpacing(12);
-        rtaCtl->addWidget(new QLabel("Sens:"));
-        m_rtaSensSpin = new QSpinBox;
-        m_rtaSensSpin->setRange(-20, 60);
-        m_rtaSensSpin->setValue(0);
-        m_rtaSensSpin->setSuffix(" dB");
-        m_rtaSensSpin->setToolTip(
-            "Shifts the scale down so quieter band levels fill the plot.\n"
-            "Per-band levels sit ~15 dB below the broadband SPL (pink noise\n"
-            "spreads across ~31 bands), so 10-20 dB here is typical.");
-        rtaCtl->addWidget(m_rtaSensSpin);
-        rtaCtl->addSpacing(12);
-        m_peakCheck = new QCheckBox("Peak hold");
-        rtaCtl->addWidget(m_peakCheck);
-        rtaCtl->addStretch(1);
-        rtaLay->addLayout(rtaCtl);
         rtaLay->addWidget(m_rta, 1);
         m_spectro = new SpectrogramWidget;
         auto *spectroPage = new QWidget;
         auto *spectroLay = new QVBoxLayout(spectroPage);
         spectroLay->setContentsMargins(0, 4, 0, 0);
-        spectroLay->setSpacing(4);
-        auto *spectroCtl = new QHBoxLayout;
-        spectroCtl->addSpacing(8);
-        spectroCtl->addWidget(new QLabel("Theme:"));
-        m_spectroThemeCombo = new QComboBox;
-        m_spectroThemeCombo->addItems(SpectrogramWidget::themeNames());
-        spectroCtl->addWidget(m_spectroThemeCombo);
-        spectroCtl->addSpacing(12);
-        spectroCtl->addWidget(new QLabel("Range:"));
-        m_spectroRangeCombo = new QComboBox;
-        m_spectroRangeCombo->addItems({"60 dB", "80 dB", "100 dB", "120 dB"});
-        m_spectroRangeCombo->setCurrentIndex(2);
-        m_spectroRangeCombo->setToolTip(
-            "Dynamic range of the color scale — a smaller range gives more "
-            "contrast.");
-        spectroCtl->addWidget(m_spectroRangeCombo);
-        spectroCtl->addSpacing(12);
-        spectroCtl->addWidget(new QLabel("Sensitivity:"));
-        m_spectroSensSpin = new QSpinBox;
-        m_spectroSensSpin->setRange(-20, 40);
-        m_spectroSensSpin->setValue(0);
-        m_spectroSensSpin->setSuffix(" dB");
-        m_spectroSensSpin->setToolTip(
-            "Shifts the color scale: positive values light up quieter "
-            "material.");
-        spectroCtl->addWidget(m_spectroSensSpin);
-        spectroCtl->addStretch(1);
-        spectroLay->addLayout(spectroCtl);
         spectroLay->addWidget(m_spectro, 1);
+        // Split view (Smaart-style): RTA stacked over a bottom-up spectrogram
+        // so both share the frequency axis. The two widgets are reparented
+        // in/out of the splitter on tab change — history travels with them.
+        m_split = new QSplitter(Qt::Vertical);
+        m_split->setChildrenCollapsible(false);
         m_tabs = new QTabWidget;
         m_tabs->addTab(rtaPage, "RTA");
         m_tabs->addTab(spectroPage, "Spectrogram");
+        m_tabs->addTab(m_split, "Split");
         root->addWidget(m_tabs, 1);
         m_history = new HistoryWidget;
         root->addWidget(m_history);
@@ -715,6 +651,81 @@ public:
 
         m_breakout = new BreakoutWindow(this);
         m_breakout->onClosed = [this] { m_breakoutAct->setChecked(false); };
+
+        // --- Display settings dialog (Settings -> Display…) ---
+        // All view controls live here instead of inline rows above the
+        // plots. Modeless, and every control applies live, so it can sit
+        // open next to the plots while tuning.
+        m_displayDlg = new QDialog(this);
+        m_displayDlg->setWindowTitle("Display");
+        auto *dispLay = new QVBoxLayout(m_displayDlg);
+        auto *rtaGroup = new QGroupBox("RTA");
+        auto *rtaForm = new QFormLayout(rtaGroup);
+        m_rtaViewCombo = new QComboBox;
+        m_rtaViewCombo->addItems({"Bars", "Line"});
+        rtaForm->addRow("View:", m_rtaViewCombo);
+        m_avgCombo = new QComboBox;
+        m_avgCombo->addItems({"Off", "Fast (125 ms)", "Slow (1 s)", "2 s"});
+        m_avgCombo->setCurrentIndex(1);
+        rtaForm->addRow("Averaging:", m_avgCombo);
+        m_rtaDecayCombo = new QComboBox;
+        m_rtaDecayCombo->addItems(
+            {"Off", "Slow (6 dB/s)", "Medium (12 dB/s)", "Fast (24 dB/s)"});
+        m_rtaDecayCombo->setToolTip(
+            "Bands rise instantly and fall at this rate.");
+        rtaForm->addRow("Decay:", m_rtaDecayCombo);
+        m_rtaRangeCombo = new QComboBox;
+        m_rtaRangeCombo->addItems({"40 dB", "60 dB", "80 dB", "100 dB"});
+        m_rtaRangeCombo->setCurrentIndex(2);
+        m_rtaRangeCombo->setToolTip("Vertical span of the RTA scale.");
+        rtaForm->addRow("Range:", m_rtaRangeCombo);
+        m_rtaSensSpin = new QSpinBox;
+        m_rtaSensSpin->setRange(-20, 60);
+        m_rtaSensSpin->setValue(0);
+        m_rtaSensSpin->setSuffix(" dB");
+        m_rtaSensSpin->setToolTip(
+            "Shifts the scale down so quieter band levels fill the plot.\n"
+            "Per-band levels sit ~15 dB below the broadband SPL (pink noise\n"
+            "spreads across ~31 bands), so 10-20 dB here is typical.");
+        rtaForm->addRow("Sensitivity:", m_rtaSensSpin);
+        m_peakCheck = new QCheckBox("Hold band maxima");
+        rtaForm->addRow("Peak hold:", m_peakCheck);
+        m_rtaGridCheck = new QCheckBox("Vertical lines at octave centers");
+        rtaForm->addRow("Freq gridlines:", m_rtaGridCheck);
+        dispLay->addWidget(rtaGroup);
+        auto *spGroup = new QGroupBox("Spectrogram");
+        auto *spForm = new QFormLayout(spGroup);
+        m_spectroThemeCombo = new QComboBox;
+        m_spectroThemeCombo->addItems(SpectrogramWidget::themeNames());
+        spForm->addRow("Theme:", m_spectroThemeCombo);
+        m_spectroRangeCombo = new QComboBox;
+        m_spectroRangeCombo->addItems({"60 dB", "80 dB", "100 dB", "120 dB"});
+        m_spectroRangeCombo->setCurrentIndex(2);
+        m_spectroRangeCombo->setToolTip(
+            "Dynamic range of the color scale — a smaller range gives more "
+            "contrast.");
+        spForm->addRow("Range:", m_spectroRangeCombo);
+        m_spectroSensSpin = new QSpinBox;
+        m_spectroSensSpin->setRange(-20, 40);
+        m_spectroSensSpin->setValue(0);
+        m_spectroSensSpin->setSuffix(" dB");
+        m_spectroSensSpin->setToolTip(
+            "Shifts the color scale: positive values light up quieter "
+            "material.");
+        spForm->addRow("Sensitivity:", m_spectroSensSpin);
+        m_spectroSpanCombo = new QComboBox;
+        m_spectroSpanCombo->addItems(
+            {"10 s", "30 s", "1 min", "2 min", "5 min", "10 min"});
+        m_spectroSpanCombo->setCurrentIndex(1);
+        m_spectroSpanCombo->setToolTip(
+            "History the spectrogram covers — longer spans scroll slower.\n"
+            "Ticks are averaged into each column, so nothing is dropped.");
+        spForm->addRow("Time span:", m_spectroSpanCombo);
+        dispLay->addWidget(spGroup);
+        auto *dispBtns = new QDialogButtonBox(QDialogButtonBox::Close);
+        QObject::connect(dispBtns, &QDialogButtonBox::rejected, m_displayDlg,
+                         &QWidget::hide);
+        dispLay->addWidget(dispBtns);
 
         loadSettings();
 
@@ -760,6 +771,25 @@ public:
                          this, [this](int) { saveSettings(); });
         QObject::connect(m_rtaSensSpin, &QSpinBox::valueChanged, this,
                          [this](int) { saveSettings(); });
+        QObject::connect(m_rtaGridCheck, &QCheckBox::toggled, this,
+                         [this](bool on) {
+                             m_rta->setFreqGridlines(on);
+                             saveSettings();
+                         });
+        QObject::connect(m_spectroSpanCombo, &QComboBox::currentIndexChanged,
+                         this, [this](int i) {
+                             m_spectro->setSpanSeconds(spectroSpanSeconds(i));
+                             saveSettings();
+                         });
+        // Split view: hovering either plot mirrors the frequency cursor onto
+        // the other (shared X axis). Frequencies, not pixels, cross the link,
+        // so it stays honest whatever the layout.
+        m_rta->onHoverFreq = [this](double f) {
+            m_spectro->setLinkedCursor(f);
+        };
+        m_spectro->onHoverFreq = [this](double f) {
+            m_rta->setLinkedCursor(f);
+        };
         QObject::connect(m_spectroThemeCombo, &QComboBox::currentIndexChanged,
                          this, [this](int i) {
                              m_spectro->setTheme(i);
@@ -775,12 +805,32 @@ public:
                              m_spectro->setSensitivityDb(v);
                              saveSettings();
                          });
+        QObject::connect(
+            m_tabs, &QTabWidget::currentChanged, this,
+            [this, rtaLay, spectroLay](int idx) {
+                const bool split = m_tabs->widget(idx) == m_split;
+                m_spectro->setVertical(split);
+                if (split) {
+                    m_split->addWidget(m_rta);
+                    m_split->addWidget(m_spectro);
+                    m_split->setStretchFactor(0, 1);
+                    m_split->setStretchFactor(1, 1);
+                } else if (m_rta->parentWidget() == m_split) {
+                    rtaLay->addWidget(m_rta, 1);
+                    spectroLay->addWidget(m_spectro, 1);
+                }
+                saveSettings();
+            });
         QObject::connect(resetBtn, &QPushButton::clicked, this, [this] {
             m_analyzer.resetLeq();
             m_analyzer.resetPeaks();
             m_metricsEng.resetSession();
             m_breakout->resetMaxima();
         });
+
+        // Applied here rather than in loadSettings so the currentChanged
+        // handler above runs and assembles the split layout if needed.
+        m_tabs->setCurrentIndex(m_savedTabIdx);
 
         // --api [port] command-line override (handy for headless testing)
         const QStringList args = QApplication::arguments();
@@ -856,6 +906,12 @@ private:
             saveSettings();
         });
         settingsMenu->addSeparator();
+        QAction *displayAct = settingsMenu->addAction("&Display…");
+        connect(displayAct, &QAction::triggered, this, [this] {
+            m_displayDlg->show();
+            m_displayDlg->raise();
+            m_displayDlg->activateWindow();
+        });
         QAction *metricsAct = settingsMenu->addAction("&Metrics…");
         connect(metricsAct, &QAction::triggered, this,
                 [this] { showMetricsSettings(); });
@@ -1181,8 +1237,15 @@ private:
         m_rtaRangeCombo->setCurrentIndex(
             std::clamp(st.value("rtaRange", 2).toInt(), 0, 3));
         m_rtaSensSpin->setValue(st.value("rtaSens", 0).toInt());
+        m_rtaGridCheck->setChecked(st.value("rtaFreqGrid", true).toBool());
+        m_spectroSpanCombo->setCurrentIndex(
+            std::clamp(st.value("spectroSpan", 1).toInt(), 0, 5));
         m_rta->setViewMode(m_rtaViewCombo->currentIndex());
         m_rta->setDecayRate(rtaDecayRate(m_rtaDecayCombo->currentIndex()));
+        m_rta->setFreqGridlines(m_rtaGridCheck->isChecked());
+        m_spectro->setSpanSeconds(
+            spectroSpanSeconds(m_spectroSpanCombo->currentIndex()));
+        m_savedTabIdx = std::clamp(st.value("viewTab", 0).toInt(), 0, 2);
         m_breakout->setAlwaysOnTop(st.value("breakoutOnTop", false).toBool());
         const QByteArray bgeo = st.value("breakoutGeo").toByteArray();
         if (!bgeo.isEmpty())
@@ -1243,6 +1306,9 @@ private:
         st.setValue("rtaDecay", m_rtaDecayCombo->currentIndex());
         st.setValue("rtaRange", m_rtaRangeCombo->currentIndex());
         st.setValue("rtaSens", m_rtaSensSpin->value());
+        st.setValue("rtaFreqGrid", m_rtaGridCheck->isChecked());
+        st.setValue("spectroSpan", m_spectroSpanCombo->currentIndex());
+        st.setValue("viewTab", m_tabs->currentIndex());
         st.setValue("breakoutOpen", m_breakout->isVisible());
         st.setValue("breakoutOnTop", m_breakout->alwaysOnTop());
         st.setValue("breakoutGeo", m_breakout->saveGeometry());
@@ -1376,6 +1442,12 @@ private:
     static double rtaRange(int idx) {
         static const double ranges[] = {40.0, 60.0, 80.0, 100.0};
         return ranges[std::clamp(idx, 0, 3)];
+    }
+
+    // Seconds of history for each Time span choice.
+    static double spectroSpanSeconds(int idx) {
+        static constexpr double s[] = {10, 30, 60, 120, 300, 600};
+        return s[std::clamp(idx, 0, 5)];
     }
 
     static double spectroRange(int idx) {
@@ -1541,6 +1613,9 @@ private:
     QComboBox *m_spectroThemeCombo;
     QComboBox *m_spectroRangeCombo;
     QSpinBox *m_spectroSensSpin;
+    QComboBox *m_spectroSpanCombo;
+    QCheckBox *m_rtaGridCheck;
+    QDialog *m_displayDlg;
     BreakoutWindow *m_breakout = nullptr;
     QAction *m_breakoutAct = nullptr;
     QCheckBox *m_peakCheck;
@@ -1551,6 +1626,8 @@ private:
     SpectrogramWidget *m_spectro;
     HistoryWidget *m_history;
     QTabWidget *m_tabs;
+    QSplitter *m_split;
+    int m_savedTabIdx = 0;
     int m_clipTicks = 0;
     qint64 m_lastHistPush = 0;
     qint64 m_lastStream = 0;
