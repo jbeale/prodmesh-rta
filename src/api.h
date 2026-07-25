@@ -72,6 +72,18 @@ public:
             double dbtp;
         };
         std::vector<Over> overs;
+        // Per-device playback status (program mode). `level` is
+        // "unknown" | "ok" | "warn" | "fail"; `reason` is empty when ok.
+        struct Playback {
+            QString device;
+            QString level;
+            QString reason;
+        };
+        std::vector<Playback> playback;
+        // Issues with the programme itself, reported once rather than
+        // repeated on every device row.
+        QString programmeLevel = "unknown";
+        QString programmeReason;
         // Derived SPL metrics (id -> value); see the Metrics dialog for ids.
         std::vector<std::pair<QString, double>> metrics;
         // Traffic-light alarm on one watched metric.
@@ -201,9 +213,24 @@ private:
         o.insert("alarm", alarmJson());
         o.insert("signal", signalJson());
         o.insert("targets", targetsJson());
-        if (m_snap.mode == "program")
+        if (m_snap.mode == "program") {
             o.insert("loudness", loudnessJson());
+            o.insert("playback", playbackJson());
+        }
         return o;
+    }
+
+    QJsonObject playbackJson() const {
+        QJsonArray a;
+        for (const auto &p : m_snap.playback)
+            a.append(QJsonObject{{"device", p.device},
+                                 {"level", p.level},
+                                 {"reason", p.reason}});
+        return QJsonObject{
+            {"programme", QJsonObject{{"level", m_snap.programmeLevel},
+                                      {"reason", m_snap.programmeReason}}},
+            {"devices", a},
+        };
     }
 
     QJsonObject signalJson() const {
@@ -455,8 +482,10 @@ private:
                 {"signal", signalJson()},
                 {"targets", targetsJson()},
             };
-            if (m_snap.mode == "program")
+            if (m_snap.mode == "program") {
                 o.insert("loudness", loudnessJson());
+                o.insert("playback", playbackJson());
+            }
             return QJsonDocument(o);
         }
         if (path == "/api/rta") {

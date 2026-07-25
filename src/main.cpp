@@ -793,6 +793,12 @@ public:
         auto *stLay = new QVBoxLayout(m_stereoPage);
         stLay->setContentsMargins(0, 4, 0, 0);
         stLay->addWidget(m_stereo, 1);
+        m_playback = new PlaybackPanel;
+        m_playbackPage = new QWidget(this);
+        m_playbackPage->hide();
+        auto *pbLay = new QVBoxLayout(m_playbackPage);
+        pbLay->setContentsMargins(0, 4, 0, 0);
+        pbLay->addWidget(m_playback, 1);
         m_tabs = new QTabWidget;
         m_tabs->addTab(rtaPage, "RTA");
         m_tabs->addTab(spectroPage, "Spectrogram");
@@ -1777,7 +1783,16 @@ private:
             m_stereoPage->setParent(this);
             m_stereoPage->hide();
         }
+        const int pb = m_tabs->indexOf(m_playbackPage);
+        if (program && pb < 0) {
+            m_tabs->addTab(m_playbackPage, "Playback");
+        } else if (!program && pb >= 0) {
+            m_tabs->removeTab(pb);
+            m_playbackPage->setParent(this);
+            m_playbackPage->hide();
+        }
         m_stereo->clear();
+        m_playback->clear();
 
         m_engine.setLoudness(program, m_pairL, m_pairR);
         m_loudEng.resetAll();
@@ -2083,6 +2098,24 @@ private:
         if (program && std::isfinite(m_loudVals.integrated))
             mv.toTarget = m_loudVals.integrated - m_targetLufs;
 
+        // Playback status: the same measurements, answered as "will this
+        // survive the listener's device". Evaluated every tick so the panel
+        // and the API agree by construction.
+        if (program) {
+            PlaybackInputs pin;
+            pin.monoDelta = m_loudVals.monoDelta;
+            pin.correlation = m_stereo->correlation();
+            pin.corrNegS = m_stereo->negativeSeconds();
+            pin.lra = m_loudVals.range;
+            pin.toTarget = mv.toTarget;
+            pin.truePeakMax = m_loudVals.truePeakMax;
+            pin.ceilDbtp = m_ceilDbtp;
+            for (int i = 0; i < DevCount; ++i)
+                m_verdicts[i] = playbackVerdict(i, pin);
+            m_progVerdict = programmeVerdict(pin);
+            m_playback->setVerdicts(m_verdicts, m_progVerdict);
+        }
+
         // Stereo field. Read as two explicit channels so L and R stay sample
         // aligned; the interleaved ring gives that for free.
         if (program) {
@@ -2183,6 +2216,22 @@ private:
         snap.overs.clear();
         for (const OverEvent &o : m_overs)
             snap.overs.push_back({o.t, o.dbtp});
+        snap.playback.clear();
+        if (program) {
+            auto levelName = [](int l) {
+                static const char *kLevels[] = {"ok", "warn", "fail"};
+                return l < 0 ? QString("unknown")
+                             : QString(kLevels[std::clamp(l, 0, 2)]);
+            };
+            for (int i = 0; i < DevCount; ++i) {
+                const DeviceVerdict &v = m_verdicts[i];
+                snap.playback.push_back({PlaybackPanel::deviceName(i),
+                                         levelName(v.level),
+                                         PlaybackPanel::issueText(v)});
+            }
+            snap.programmeLevel = levelName(m_progVerdict.level);
+            snap.programmeReason = PlaybackPanel::issueText(m_progVerdict);
+        }
         snap.targetLufs = program ? m_targetLufs : kNaN;
         snap.ceilDbtp = program ? m_ceilDbtp : kNaN;
         snap.metrics.clear();
@@ -2312,6 +2361,10 @@ private:
     std::vector<float> m_bufL, m_bufR;
     StereoScope *m_stereo;
     QWidget *m_stereoPage;
+    PlaybackPanel *m_playback;
+    QWidget *m_playbackPage;
+    DeviceVerdict m_verdicts[DevCount];
+    DeviceVerdict m_progVerdict;
     RtaWidget *m_rta;
     RtaWidget *m_loudRta;              // the one under the loudness meter
     std::vector<RtaWidget *> m_rtas;   // every RTA that view settings apply to
@@ -2556,6 +2609,125 @@ static bool stereoSelftest() {
     return ok;
 }
 
+// Playback rules: each must fire on the devices whose physics it describes,
+// and on no others. Wrong-device firing is the failure mode that would make
+// the panel worse than useless.
+static bool playbackSelftest() {
+    bool ok = true;
+    auto lv = [](const PlaybackInputs &in, int dev) {
+        return playbackVerdict(dev, in).level;
+    };
+    auto name = [](int l) {
+        return l == CheckFail   ? "fail"
+               : l == CheckWarn ? "warn"
+               : l == CheckOk   ? "ok"
+                                : "unknown";
+    };
+
+    // Nothing measured yet must not read as a pass.
+    PlaybackInputs empty;
+    std::printf("playback: no data -> phone %s, car %s, headphones %s "
+                "(expected unknown)\n",
+                name(lv(empty, DevPhone)), name(lv(empty, DevCar)),
+                name(lv(empty, DevHeadphones)));
+    ok = ok && lv(empty, DevPhone) == CheckUnknown &&
+         lv(empty, DevCar) == CheckUnknown &&
+         lv(empty, DevHeadphones) == CheckUnknown;
+
+    // A clean programme passes everywhere.
+    PlaybackInputs good;
+    good.monoDelta = -0.5;
+    good.correlation = 0.9;
+    good.lra = 7.0;
+    good.toTarget = 0.2;
+    good.truePeakMax = -2.0;
+    bool allOk = true;
+    for (int d = 0; d < DevCount; ++d)
+        allOk = allOk && lv(good, d) == CheckOk;
+    std::printf("playback: clean programme -> all ok = %d (expected 1)\n",
+                int(allOk));
+    ok = ok && allOk;
+
+    // Heavy mono loss is a phone/TV problem and not a car or headphone one.
+    PlaybackInputs monoBad = good;
+    monoBad.monoDelta = -7.0;
+    std::printf("playback: -7 LU mono loss -> phone %s, tv %s, car %s, "
+                "headphones %s (expected fail, fail, ok, ok)\n",
+                name(lv(monoBad, DevPhone)), name(lv(monoBad, DevTv)),
+                name(lv(monoBad, DevCar)), name(lv(monoBad, DevHeadphones)));
+    ok = ok && lv(monoBad, DevPhone) == CheckFail &&
+         lv(monoBad, DevTv) == CheckFail && lv(monoBad, DevCar) == CheckOk &&
+         lv(monoBad, DevHeadphones) == CheckOk;
+
+    // A wide range is a car problem, and a virtue nearly everywhere else.
+    PlaybackInputs wide = good;
+    wide.lra = 14.0;
+    std::printf("playback: 14 LU range -> car %s, phone %s, headphones %s "
+                "(expected fail, ok, ok)\n",
+                name(lv(wide, DevCar)), name(lv(wide, DevPhone)),
+                name(lv(wide, DevHeadphones)));
+    ok = ok && lv(wide, DevCar) == CheckFail &&
+         lv(wide, DevPhone) == CheckOk &&
+         lv(wide, DevHeadphones) == CheckOk;
+
+    // Polarity cancels on a single speaker; on headphones it merely unsettles.
+    PlaybackInputs flipped = good;
+    flipped.correlation = -0.8;
+    flipped.corrNegS = 5.0;
+    std::printf("playback: sustained negative correlation -> phone %s, "
+                "headphones %s (expected fail, warn)\n",
+                name(lv(flipped, DevPhone)), name(lv(flipped, DevHeadphones)));
+    ok = ok && lv(flipped, DevPhone) == CheckFail &&
+         lv(flipped, DevHeadphones) == CheckWarn;
+
+    // A brief dip below zero is normal on wide material and must not fire.
+    PlaybackInputs blip = good;
+    blip.correlation = -0.05;
+    blip.corrNegS = 0.5;
+    std::printf("playback: 0.5 s of negative correlation -> phone %s "
+                "(expected ok)\n",
+                name(lv(blip, DevPhone)));
+    ok = ok && lv(blip, DevPhone) == CheckOk;
+
+    // Level problems belong to the programme, not to any one device: they
+    // must NOT appear on the device rows, or four identical lines bury the
+    // rows that actually differ.
+    PlaybackInputs hot = good;
+    hot.toTarget = 3.0;
+    PlaybackInputs clipped = good;
+    clipped.truePeakMax = 0.5;
+    bool devicesQuiet = true;
+    for (int d = 0; d < DevCount; ++d)
+        devicesQuiet = devicesQuiet && lv(hot, d) == CheckOk &&
+                       lv(clipped, d) == CheckOk;
+    const DeviceVerdict pHot = programmeVerdict(hot);
+    const DeviceVerdict pClip = programmeVerdict(clipped);
+    std::printf("playback: level issues stay off the device rows = %d "
+                "(expected 1); programme %s/%s (expected warn/warn)\n",
+                int(devicesQuiet), name(pHot.level), name(pClip.level));
+    ok = ok && devicesQuiet && pHot.level == CheckWarn &&
+         pHot.issue == IssueOverTarget && pClip.level == CheckWarn &&
+         pClip.issue == IssueTruePeak;
+
+    // A clean programme reports ok rather than unknown.
+    const DeviceVerdict pGood = programmeVerdict(good);
+    std::printf("playback: clean programme verdict = %s (expected ok)\n",
+                name(pGood.level));
+    ok = ok && pGood.level == CheckOk;
+
+    // Worst-wins within a device: fail outranks warn and keeps its reason.
+    PlaybackInputs both = good;
+    both.monoDelta = -7.0;
+    both.corrNegS = 5.0;
+    both.correlation = -0.8;
+    const DeviceVerdict v = playbackVerdict(DevPhone, both);
+    std::printf("playback: two device failures -> %s, issue %d "
+                "(expected fail, %d)\n",
+                name(v.level), v.issue, int(IssueMonoLoss));
+    ok = ok && v.level == CheckFail && v.issue == IssueMonoLoss;
+    return ok;
+}
+
 // Signal-loss detection: the two triggers must fire on their own horizons and
 // neither may fire on quiet-but-present programme material.
 static bool signalSelftest() {
@@ -2699,6 +2871,7 @@ static int selftest() {
     ok = loudnessSelftest() && ok;
     ok = signalSelftest() && ok;
     ok = stereoSelftest() && ok;
+    ok = playbackSelftest() && ok;
 
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

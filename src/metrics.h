@@ -262,6 +262,139 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Playback status: will this survive the listener's device?
+//
+// Translates measurements an operator cannot act on ("correlation 0.3, LRA
+// 14 LU") into the question they actually have — will this sound right in a
+// car? Each device stands for a real, physical failure mode:
+//
+//   Phone      one speaker, so it hears the mono sum, and nothing below ~500 Hz
+//   TV         also effectively mono, on small speakers, dialogue-critical
+//   Car        ~70 dB of road noise, mostly LF — quiet passages simply vanish
+//   Headphones full range and truly stereo, so it exposes everything
+//
+// Deliberately NOT a letter grade. A "C" looks objective while hiding a pile
+// of judgement calls, and it is not actionable — it says something is wrong
+// without saying what, which invites re-EQing a mix that was fine. A status
+// plus the specific reason keeps the at-a-glance property and stays honest.
+//
+// Reasons are returned as a code and a number, not a string, so this header
+// stays free of Qt and of presentation decisions.
+
+enum PlaybackDevice { DevPhone = 0, DevTv, DevCar, DevHeadphones, DevCount };
+enum CheckLevel { CheckUnknown = -1, CheckOk = 0, CheckWarn = 1, CheckFail = 2 };
+enum PlaybackIssue {
+    IssueNone = 0,
+    IssueMonoLoss,    // value = LU lost summing to mono
+    IssuePolarity,    // value = correlation
+    IssueRange,       // value = LRA in LU
+    IssueOverTarget,  // value = LU above the delivery target
+    IssueTruePeak,    // value = dBTP above the ceiling
+};
+
+struct PlaybackInputs {
+    double monoDelta = kNaN;    // LU, <= 0
+    double correlation = kNaN;  // -1 .. +1
+    double corrNegS = 0.0;      // seconds of sustained negative correlation
+    double lra = kNaN;          // LU
+    double toTarget = kNaN;     // integrated - target, LU
+    double truePeakMax = kNaN;  // dBTP
+    double ceilDbtp = -1.0;     // dBTP
+};
+
+struct DeviceVerdict {
+    int level = CheckUnknown;
+    int issue = IssueNone;
+    double value = kNaN;
+};
+
+// Thresholds. Each maps to a physical cause rather than taste — that is the
+// bar for adding one. Spectral-balance rules are deliberately absent: a
+// sermon and a worship set legitimately differ, and a rule that marks spoken
+// word down for lacking bass would be wrong.
+namespace playback {
+inline constexpr double kMonoWarnLu = -3.0;   // uncorrelated stereo alone
+inline constexpr double kMonoFailLu = -6.0;   // something is cancelling
+inline constexpr double kPolaritySec = 2.0;   // sustained, not a flicker
+inline constexpr double kRangeWarnLu = 8.0;
+inline constexpr double kRangeFailLu = 12.0;  // quiet parts lost to road noise
+inline constexpr double kOverTargetLu = 2.0;  // platform will attenuate
+}  // namespace playback
+
+// Worst-wins, keeping the reason that produced the worst level.
+inline DeviceVerdict playbackVerdict(int device, const PlaybackInputs &in) {
+    DeviceVerdict v;
+    auto raise = [&](int level, int issue, double value) {
+        if (level > v.level) {
+            v.level = level;
+            v.issue = issue;
+            v.value = value;
+        }
+    };
+    // Only claim a pass once the input that defines this device's risk has
+    // actually arrived. Reporting "ok" from no data is worse than saying
+    // nothing — it reads as a clean bill of health. raise() promotes out of
+    // unknown on its own when a real problem is found.
+    const bool mono = device == DevPhone || device == DevTv;
+    const bool haveMono = std::isfinite(in.monoDelta);
+    const bool haveLra = std::isfinite(in.lra);
+    const bool haveEnough =
+        mono ? haveMono
+             : device == DevCar
+                   ? haveLra
+                   : std::isfinite(in.truePeakMax) ||
+                         std::isfinite(in.correlation);
+    if (haveEnough)
+        v.level = CheckOk;
+
+    // Phones and TVs hear the mono sum, so this is their defining risk.
+    if (mono && haveMono) {
+        if (in.monoDelta <= playback::kMonoFailLu)
+            raise(CheckFail, IssueMonoLoss, in.monoDelta);
+        else if (in.monoDelta < playback::kMonoWarnLu)
+            raise(CheckWarn, IssueMonoLoss, in.monoDelta);
+    }
+    // A polarity flip cancels outright on a single speaker; on headphones it
+    // survives but the image is unstable, so it warns rather than fails.
+    if (in.corrNegS > playback::kPolaritySec)
+        raise(mono ? CheckFail : CheckWarn, IssuePolarity, in.correlation);
+    // Road noise swallows the quiet end; a wide range is a car problem
+    // specifically, and a virtue nearly everywhere else.
+    if (device == DevCar && haveLra) {
+        if (in.lra >= playback::kRangeFailLu)
+            raise(CheckFail, IssueRange, in.lra);
+        else if (in.lra >= playback::kRangeWarnLu)
+            raise(CheckWarn, IssueRange, in.lra);
+    }
+    return v;
+}
+
+// Problems with the programme itself rather than with how a device reproduces
+// it. Reported once instead of repeated on every row: a per-device panel
+// should say what *differs* between devices, and four identical lines saying
+// "over target" is noise that buries the rows that do differ.
+inline DeviceVerdict programmeVerdict(const PlaybackInputs &in) {
+    DeviceVerdict v;
+    if (std::isfinite(in.toTarget) || std::isfinite(in.truePeakMax))
+        v.level = CheckOk;
+    // Platform normalisation will simply undo the extra level, so the loudness
+    // was traded for nothing.
+    if (std::isfinite(in.toTarget) && in.toTarget >= playback::kOverTargetLu) {
+        v.level = CheckWarn;
+        v.issue = IssueOverTarget;
+        v.value = in.toTarget;
+    }
+    // Inter-sample overshoot outranks it: encoders reconstruct those peaks and
+    // distort, which no amount of normalisation undoes.
+    if (std::isfinite(in.truePeakMax) && in.truePeakMax > in.ceilDbtp) {
+        v.level = CheckWarn;
+        v.issue = IssueTruePeak;
+        v.value = in.truePeakMax - in.ceilDbtp;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
 
 // EBU R128 / ITU-R BS.1770 loudness from gapless 100 ms sub-blocks.
 //

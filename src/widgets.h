@@ -1168,6 +1168,7 @@ public:
     }
 
     double correlation() const { return m_corr; }
+    double negativeSeconds() const { return m_negS; }
 
 protected:
     void paintEvent(QPaintEvent *) override {
@@ -1347,6 +1348,157 @@ private:
     double m_monoDelta = kNaN;
     double m_negS = 0.0;  // seconds of sustained negative correlation
     bool m_mono = false;
+};
+
+// ---------------------------------------------------------------------------
+
+// Per-device playback status. One row per device: a status dot, the device,
+// and the specific reason — never a letter grade, because a grade hides the
+// judgement in its weighting and tells nobody what to change.
+class PlaybackPanel : public QWidget {
+public:
+    PlaybackPanel() { setMinimumHeight(200); }
+
+    void setVerdicts(const DeviceVerdict (&v)[DevCount],
+                     const DeviceVerdict &programme) {
+        for (int i = 0; i < DevCount; ++i)
+            m_v[i] = v[i];
+        m_prog = programme;
+        update();
+    }
+
+    void clear() {
+        for (auto &v : m_v)
+            v = DeviceVerdict();
+        m_prog = DeviceVerdict();
+        update();
+    }
+
+    // Public so the dashboard and API can phrase things identically.
+    static QString issueText(const DeviceVerdict &v) {
+        switch (v.issue) {
+        case IssueMonoLoss:
+            return QString("loses %1 LU summed to mono")
+                .arg(std::fabs(v.value), 0, 'f', 1);
+        case IssuePolarity:
+            return QString("polarity flip (correlation %1)")
+                .arg(v.value, 0, 'f', 2);
+        case IssueRange:
+            return QString("%1 LU range — quiet parts lost to road noise")
+                .arg(v.value, 0, 'f', 1);
+        case IssueOverTarget:
+            return QString("%1 LU over target — the platform will turn it down")
+                .arg(v.value, 0, 'f', 1);
+        case IssueTruePeak:
+            return QString("%1 dB over the true-peak ceiling — encoder "
+                           "distortion")
+                .arg(v.value, 0, 'f', 1);
+        default:
+            return QString();
+        }
+    }
+
+    static const char *deviceName(int d) {
+        switch (d) {
+        case DevPhone: return "Phone speaker";
+        case DevTv: return "TV speakers";
+        case DevCar: return "Car";
+        default: return "Headphones";
+        }
+    }
+
+    // What the device stands for, so the row is self-explaining.
+    static const char *deviceWhy(int d) {
+        switch (d) {
+        case DevPhone: return "one speaker — hears the mono sum";
+        case DevTv: return "small speakers, effectively mono";
+        case DevCar: return "road noise buries the quiet end";
+        default: return "full range, true stereo — hides nothing";
+        }
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter qp(this);
+        qp.fillRect(rect(), theme::bg);
+        qp.setRenderHint(QPainter::Antialiasing);
+        const int left = 16;
+        const int w = width() - 32;
+        if (w < 220)
+            return;
+
+        QFont capF = font();
+        capF.setPointSize(9);
+        QFont nameF = font();
+        nameF.setPointSize(std::clamp(height() / 22, 10, 15));
+        nameF.setBold(true);
+        const int progH = 44;
+        const int rowH =
+            std::clamp((height() - 34 - progH) / DevCount, 32, 70);
+
+        qp.setFont(capF);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(left, 8, w, 16), Qt::AlignLeft,
+                    "LIKELY EXPERIENCE ON");
+
+        for (int i = 0; i < DevCount; ++i) {
+            const int y = 30 + i * rowH;
+            const DeviceVerdict &v = m_v[i];
+            const QColor c(levelColor(v.level));
+
+            qp.setBrush(c);
+            qp.setPen(Qt::NoPen);
+            qp.drawEllipse(QPointF(left + 7, y + rowH / 2.0), 6.5, 6.5);
+
+            qp.setFont(nameF);
+            qp.setPen(QColor("#e8ecf4"));
+            const int tx = left + 26;
+            qp.drawText(QRect(tx, y + rowH / 2 - 18, w - 26, 20), Qt::AlignLeft,
+                        deviceName(i));
+
+            qp.setFont(capF);
+            qp.setPen(c);
+            const QString reason =
+                v.level == CheckUnknown ? QString("measuring…")
+                : v.issue == IssueNone  ? QString("fine — %1").arg(deviceWhy(i))
+                                        : issueText(v);
+            qp.drawText(QRect(tx, y + rowH / 2 + 2, w - 26, 18), Qt::AlignLeft,
+                        reason);
+
+            if (i + 1 < DevCount) {
+                qp.setPen(QPen(theme::grid, 1));
+                qp.drawLine(left, y + rowH, left + w, y + rowH);
+            }
+        }
+
+        // Programme-level issues, once. These are about the mix itself rather
+        // than about any device's reproduction of it, so they get their own
+        // line instead of being repeated on all four rows.
+        const int py = 30 + DevCount * rowH + 8;
+        const QColor pc(levelColor(m_prog.level));
+        qp.setPen(QPen(theme::grid, 1));
+        qp.drawLine(left, py - 6, left + w, py - 6);
+        qp.setFont(capF);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(left, py, 100, 16), Qt::AlignLeft, "PROGRAMME");
+        qp.setPen(pc);
+        qp.drawText(QRect(left + 96, py, w - 96, 16), Qt::AlignLeft,
+                    m_prog.level == CheckUnknown ? QString("measuring…")
+                    : m_prog.issue == IssueNone
+                        ? QString("on target, under the ceiling")
+                        : issueText(m_prog));
+    }
+
+private:
+    static const char *levelColor(int level) {
+        return level == CheckFail   ? "#e05c5c"
+               : level == CheckWarn ? "#e8c84b"
+               : level == CheckOk   ? "#2fbf9b"
+                                    : "#5a6172";
+    }
+
+    DeviceVerdict m_v[DevCount];
+    DeviceVerdict m_prog;
 };
 
 // ---------------------------------------------------------------------------

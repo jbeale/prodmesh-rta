@@ -65,6 +65,21 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
   .gauge .dot { position: absolute; top: 0; width: 8px; height: 8px;
                 border-radius: 50%; background: var(--bar); margin-left: -4px; }
   .gauge .dot.out { background: var(--warn); }
+  #playback { background: var(--panel); border: 1px solid var(--border);
+              border-radius: 8px; padding: 10px 14px 12px; margin-bottom: 14px;
+              display: none; }
+  #playback .cap { font-size: 11px; color: var(--dim); letter-spacing: 0.5px; }
+  #playback .prog { font-size: 13px; margin: 4px 0 10px; }
+  #playback .row { display: flex; align-items: baseline; gap: 10px;
+                   padding: 5px 0; border-top: 1px solid var(--border); }
+  #playback .dot { width: 10px; height: 10px; border-radius: 50%;
+                   flex: 0 0 auto; align-self: center; }
+  #playback .dev { font-weight: 600; min-width: 130px; }
+  #playback .why { font-size: 12px; }
+  .lvl-ok { color: var(--bar); } .lvl-warn { color: var(--warn); }
+  .lvl-fail { color: var(--alert); } .lvl-unknown { color: var(--dim); }
+  .bg-ok { background: var(--bar); } .bg-warn { background: var(--warn); }
+  .bg-fail { background: var(--alert); } .bg-unknown { background: #5a6172; }
   #rtabox { background: var(--panel); border: 1px solid var(--border);
             border-radius: 8px; padding: 10px; }
   #rtabox .cap { font-size: 11px; color: var(--dim); margin-bottom: 6px; }
@@ -82,6 +97,11 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
 <div id="alarmbanner"></div>
 <div class="bigrow" id="bigrow"></div>
 <div class="gridrow" id="gridrow"></div>
+<div id="playback">
+  <div class="cap">LIKELY EXPERIENCE ON</div>
+  <div class="prog" id="pb-prog"></div>
+  <div id="pb-rows"></div>
+</div>
 <div id="rtabox">
   <div class="cap" id="rtacap">RTA — 1/3 OCTAVE</div>
   <canvas id="rta"></canvas>
@@ -197,6 +217,27 @@ function setSignalUi(sig, timeMs) {
   document.title = "⚠ NO AUDIO " + secs + "s — " + BASE_TITLE;
 }
 
+// Per-device status. Deliberately a status plus a reason, never a grade — a
+// letter hides the weighting and does not say what to change.
+function setPlaybackUi(pb) {
+  const box = document.getElementById("playback");
+  if (!pb || !pb.devices) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  const p = pb.programme || {};
+  const plvl = p.level || "unknown";
+  document.getElementById("pb-prog").innerHTML =
+    '<span class="cap">PROGRAMME</span> <span class="lvl-' + plvl + '">' +
+    (plvl === "unknown" ? "measuring…"
+      : (p.reason || "on target, under the ceiling")) + "</span>";
+  document.getElementById("pb-rows").innerHTML = pb.devices.map(d => {
+    const lv = d.level || "unknown";
+    const why = lv === "unknown" ? "measuring…" : (d.reason || "fine");
+    return '<div class="row"><span class="dot bg-' + lv + '"></span>' +
+           '<span class="dev">' + d.device + '</span>' +
+           '<span class="why lvl-' + lv + '">' + why + "</span></div>";
+  }).join("");
+}
+
 function setAlarmUi(alarm) {
   const banner = document.getElementById("alarmbanner");
   banner.className = "";
@@ -284,6 +325,7 @@ function connect() {
       document.getElementById("cap-" + id).textContent = caption(id, w, mode);
       document.getElementById("val-" + id).textContent = fmt(m[id], id);
     }
+    setPlaybackUi(d.playback);
     setSignalUi(d.signal, d.time_ms);
     setAlarmUi(d.alarm);
     setGauges(m, d.targets);
