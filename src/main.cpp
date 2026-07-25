@@ -703,12 +703,26 @@ public:
         m_split->setChildrenCollapsible(false);
         // Program-mode loudness view. Built always, but only added to the tab
         // bar in Program mode (see applyMode).
+        // Meter over its own RTA: "am I on target" and "what does it sound
+        // like" answered in one view. A second RtaWidget rather than
+        // reparenting the main one — they are cheap, and the tab machinery
+        // stays simple.
         m_loudMeter = new LoudnessMeter;
+        m_loudMeter->setMinimumHeight(130);
+        m_loudRta = new RtaWidget;
+        m_loudRta->setMinimumHeight(120);
+        m_rtas = {m_rta, m_loudRta};
         m_loudPage = new QWidget(this);
         m_loudPage->hide();
         auto *loudLay = new QVBoxLayout(m_loudPage);
         loudLay->setContentsMargins(0, 4, 0, 0);
-        loudLay->addWidget(m_loudMeter, 1);
+        auto *loudSplit = new QSplitter(Qt::Vertical);
+        loudSplit->setChildrenCollapsible(false);
+        loudSplit->addWidget(m_loudMeter);
+        loudSplit->addWidget(m_loudRta);
+        loudSplit->setStretchFactor(0, 2);
+        loudSplit->setStretchFactor(1, 3);
+        loudLay->addWidget(loudSplit, 1);
         m_tabs = new QTabWidget;
         m_tabs->addTab(rtaPage, "RTA");
         m_tabs->addTab(spectroPage, "Spectrogram");
@@ -900,12 +914,14 @@ public:
                          [this](double) { saveSettings(); });
         QObject::connect(m_rtaViewCombo, &QComboBox::currentIndexChanged, this,
                          [this](int i) {
-                             m_rta->setViewMode(i);
+                             for (RtaWidget *r : m_rtas)
+                                 r->setViewMode(i);
                              saveSettings();
                          });
         QObject::connect(m_rtaDecayCombo, &QComboBox::currentIndexChanged, this,
                          [this](int i) {
-                             m_rta->setDecayRate(rtaDecayRate(i));
+                             for (RtaWidget *r : m_rtas)
+                                 r->setDecayRate(rtaDecayRate(i));
                              saveSettings();
                          });
         QObject::connect(m_rtaRangeCombo, &QComboBox::currentIndexChanged,
@@ -914,7 +930,8 @@ public:
                          [this](int) { saveSettings(); });
         QObject::connect(m_rtaGridCheck, &QCheckBox::toggled, this,
                          [this](bool on) {
-                             m_rta->setFreqGridlines(on);
+                             for (RtaWidget *r : m_rtas)
+                                 r->setFreqGridlines(on);
                              saveSettings();
                          });
         QObject::connect(m_spectroSpanCombo, &QComboBox::currentIndexChanged,
@@ -1441,15 +1458,14 @@ private:
             std::clamp(st.value("rtaView", 0).toInt(), 0, 1));
         m_rtaDecayCombo->setCurrentIndex(
             std::clamp(st.value("rtaDecay", 0).toInt(), 0, 3));
-        m_rtaRangeCombo->setCurrentIndex(
-            std::clamp(st.value("rtaRange", 2).toInt(), 0, 3));
-        m_rtaSensSpin->setValue(st.value("rtaSens", 0).toInt());
         m_rtaGridCheck->setChecked(st.value("rtaFreqGrid", true).toBool());
         m_spectroSpanCombo->setCurrentIndex(
             std::clamp(st.value("spectroSpan", 1).toInt(), 0, 5));
-        m_rta->setViewMode(m_rtaViewCombo->currentIndex());
-        m_rta->setDecayRate(rtaDecayRate(m_rtaDecayCombo->currentIndex()));
-        m_rta->setFreqGridlines(m_rtaGridCheck->isChecked());
+        for (RtaWidget *r : m_rtas) {
+            r->setViewMode(m_rtaViewCombo->currentIndex());
+            r->setDecayRate(rtaDecayRate(m_rtaDecayCombo->currentIndex()));
+            r->setFreqGridlines(m_rtaGridCheck->isChecked());
+        }
         m_spectro->setSpanSeconds(
             spectroSpanSeconds(m_spectroSpanCombo->currentIndex()));
         m_breakout->setAlwaysOnTop(st.value("breakoutOnTop", false).toBool());
@@ -1527,6 +1543,19 @@ private:
             st.value(mkey("alarmAlert"), program ? -9.0 : 102.0).toDouble();
         m_inputChannel = st.value(mkey("inputChannel"), 0).toInt();
         m_savedTabIdx = st.value(mkey("viewTab"), 0).toInt();
+        // The RTA's vertical scale is mode-scoped because its top is
+        // cal - sensitivity. In Acoustic, cal is ~100-145 dB SPL and per-band
+        // levels sit well below broadband, so a large sensitivity shift is
+        // normal. In Program, cal is 0 and the natural top is 0 dBFS — the
+        // same shift would drop the ceiling below the signal and pin every
+        // band against the top.
+        m_rtaSensSpin->blockSignals(true);
+        m_rtaSensSpin->setValue(st.value(mkey("rtaSens"), 0).toInt());
+        m_rtaSensSpin->blockSignals(false);
+        m_rtaRangeCombo->blockSignals(true);
+        m_rtaRangeCombo->setCurrentIndex(
+            std::clamp(st.value(mkey("rtaRange"), 2).toInt(), 0, 3));
+        m_rtaRangeCombo->blockSignals(false);
         // Target bands as "id:lo:hi". Acoustic defaults to C-A ratio 8–12 dB,
         // the range that keeps low-end energy below the "it's too loud" zone.
         m_targets.clear();
@@ -1554,6 +1583,8 @@ private:
         st.setValue(mkey("alarmAlert"), m_alarmAlert);
         st.setValue(mkey("inputChannel"), m_inputChannel);
         st.setValue(mkey("viewTab"), m_tabs->currentIndex());
+        st.setValue(mkey("rtaSens"), m_rtaSensSpin->value());
+        st.setValue(mkey("rtaRange"), m_rtaRangeCombo->currentIndex());
         QStringList tgts;
         for (auto it = m_targets.constBegin(); it != m_targets.constEnd(); ++it)
             tgts << QString("%1:%2:%3")
@@ -1581,8 +1612,6 @@ private:
         st.setValue("spectroSens", m_spectroSensSpin->value());
         st.setValue("rtaView", m_rtaViewCombo->currentIndex());
         st.setValue("rtaDecay", m_rtaDecayCombo->currentIndex());
-        st.setValue("rtaRange", m_rtaRangeCombo->currentIndex());
-        st.setValue("rtaSens", m_rtaSensSpin->value());
         st.setValue("rtaFreqGrid", m_rtaGridCheck->isChecked());
         st.setValue("spectroSpan", m_spectroSpanCombo->currentIndex());
         st.setValue("breakoutOpen", m_breakout->isVisible());
@@ -1899,7 +1928,9 @@ private:
         // sensitivity shift: per-band levels run well below broadband SPL,
         // and high-headroom calibrations push them further down still.
         const double rtaTop = cal - m_rtaSensSpin->value();
-        m_rta->setData(res.bands, res.hires, res.peaks,
+        // Only the visible one repaints, so feeding both costs a copy.
+        for (RtaWidget *r : m_rtas)
+            r->setData(res.bands, res.hires, res.peaks,
                        rtaTop - rtaRange(m_rtaRangeCombo->currentIndex()),
                        rtaTop, dt);
         m_spectro->pushColumn(m_analyzer.lastPower(), m_analyzer.binWidth());
@@ -2037,6 +2068,8 @@ private:
     QLabel *m_apiLbl;
     QLabel *m_clipLbl;
     RtaWidget *m_rta;
+    RtaWidget *m_loudRta;              // the one under the loudness meter
+    std::vector<RtaWidget *> m_rtas;   // every RTA that view settings apply to
     SpectrogramWidget *m_spectro;
     HistoryWidget *m_history;
     QTabWidget *m_tabs;

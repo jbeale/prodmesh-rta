@@ -887,67 +887,88 @@ protected:
         const int left = 14, top = 10;
         const int w = width() - left - 14;
         const int h = height() - top - 10;
-        if (w < 240 || h < 90)
+        if (w < 240 || h < 80)
             return;
 
+        // Everything scales with the height we are given: this shares a
+        // splitter with the RTA, and it gets read from across the room.
+        const int numPt = std::clamp(h / 4, 22, 64);
+        const int tpPt = std::clamp(h / 9, 12, 30);
+        const int capPt = std::clamp(h / 18, 8, 13);
+        const int mH = std::clamp(h / 8, 12, 46);
+        const int sH = std::clamp(h / 6, 18, 64);
+        const int gap = std::clamp(h / 24, 4, 12);
+
         QFont capF = font();
-        capF.setPointSize(9);
+        capF.setPointSize(capPt);
+        const int capH = QFontMetrics(capF).height();
         QFont numF = font();
         numF.setFamilies({"Consolas", "Menlo", "Courier New"});
         numF.setBold(true);
+        numF.setPointSize(numPt);
+        const int numH = QFontMetrics(numF).height();
+        QFont tpF = numF;
+        tpF.setPointSize(tpPt);
+        const int tpH = QFontMetrics(tpF).height();
 
         // --- left panel: the number people actually read ---
-        const int panelW = std::min(320, w * 2 / 5);
+        const int panelW = std::min(340, w * 2 / 5);
+        const int blockH = capH + numH + capH + gap + capH + tpH;
+        int y = top + std::max(0, (h - blockH) / 2);
+
         qp.setFont(capF);
         qp.setPen(theme::text);
-        qp.drawText(QRect(left, top, panelW, 14), Qt::AlignLeft, "INTEGRATED");
+        qp.drawText(QRect(left, y, panelW, capH), Qt::AlignLeft, "INTEGRATED");
+        y += capH;
 
         const double d = std::isfinite(m_v.integrated)
                              ? m_v.integrated - m_target
                              : kNaN;
-        numF.setPointSize(34);
         qp.setFont(numF);
         qp.setPen(QColor(deltaColor(d)));
-        qp.drawText(QRect(left, top + 14, panelW, 46), Qt::AlignLeft,
+        qp.drawText(QRect(left, y, panelW, numH), Qt::AlignLeft,
                     std::isfinite(m_v.integrated)
                         ? QString::number(m_v.integrated, 'f', 1) + " LUFS"
                         : QString("--.- LUFS"));
+        y += numH;
 
         qp.setFont(capF);
         qp.setPen(theme::text);
-        qp.drawText(QRect(left, top + 62, panelW, 14), Qt::AlignLeft,
+        qp.drawText(QRect(left, y, panelW, capH), Qt::AlignLeft,
                     std::isfinite(d)
                         ? QString("target %1  ·  %2%3 LU")
                               .arg(m_target, 0, 'f', 1)
                               .arg(d >= 0 ? "+" : "")
                               .arg(d, 0, 'f', 1)
                         : QString("target %1 LUFS").arg(m_target, 0, 'f', 1));
+        y += capH + gap;
 
         // True peak, with the ceiling it is being judged against.
         const bool tpOver = std::isfinite(m_v.truePeakMax) &&
                             m_v.truePeakMax > m_ceil;
-        qp.setPen(theme::text);
-        qp.drawText(QRect(left, top + 84, panelW, 14), Qt::AlignLeft,
+        qp.drawText(QRect(left, y, panelW, capH), Qt::AlignLeft,
                     QString("TRUE PEAK  (ceiling %1 dBTP)")
                         .arg(m_ceil, 0, 'f', 1));
-        numF.setPointSize(15);
-        qp.setFont(numF);
+        y += capH;
+        qp.setFont(tpF);
         qp.setPen(QColor(tpOver ? "#e05c5c" : "#e8ecf4"));
-        qp.drawText(QRect(left, top + 98, panelW, 22), Qt::AlignLeft,
-                    std::isfinite(m_v.truePeakMax)
-                        ? QString("%1 dBTP").arg(m_v.truePeakMax, 0, 'f', 1)
-                        : QString("--.- dBTP"));
+        const QString tpTxt =
+            std::isfinite(m_v.truePeakMax)
+                ? QString("%1 dBTP").arg(m_v.truePeakMax, 0, 'f', 1)
+                : QString("--.- dBTP");
+        qp.drawText(QRect(left, y, panelW, tpH), Qt::AlignLeft, tpTxt);
         if (m_over > 0) {
             qp.setFont(capF);
             qp.setPen(QColor("#e05c5c"));
-            qp.drawText(QRect(left + 110, top + 102, panelW - 110, 16),
-                        Qt::AlignLeft,
-                        QString("%1 over").arg(m_over));
+            qp.drawText(
+                QRect(left + QFontMetrics(tpF).horizontalAdvance(tpTxt) + 12,
+                      y + tpH - capH - 2, panelW, capH),
+                Qt::AlignLeft, QString("%1 over").arg(m_over));
         }
 
         // --- right: M / S bars on a target-centred LUFS scale ---
-        const int bx = left + panelW + 10;
-        const int bw = w - panelW - 10;
+        const int bx = left + panelW + 12;
+        const int bw = w - panelW - 12;
         if (bw < 120)
             return;
         const double lo = m_target - 24.0, hi = m_target + 9.0;
@@ -955,19 +976,19 @@ protected:
             return bx + bw * std::clamp((l - lo) / (hi - lo), 0.0, 1.0);
         };
 
-        const int barTop = top + 4;
-        const int mH = 20, sH = 28, gap = 6;
-        const QRect track(bx, barTop, bw, mH + gap + sH);
+        const int trackH = mH + gap + sH;
+        const int axisH = capH + 6;
+        const int barTop = top + std::max(0, (h - trackH - axisH) / 2);
+        const QRect track(bx, barTop, bw, trackH);
         qp.fillRect(track, QColor("#1b1f28"));
 
         // Target band (+/- 1 LU is the tolerance broadcast specs use).
         qp.fillRect(QRectF(xOf(m_target - 1.0), barTop,
-                           xOf(m_target + 1.0) - xOf(m_target - 1.0),
-                           mH + gap + sH),
+                           xOf(m_target + 1.0) - xOf(m_target - 1.0), trackH),
                     QColor(0x2f, 0xbf, 0x9b, 40));
         qp.setPen(QPen(theme::bar, 1, Qt::DashLine));
         qp.drawLine(QPointF(xOf(m_target), barTop),
-                    QPointF(xOf(m_target), barTop + mH + gap + sH));
+                    QPointF(xOf(m_target), barTop + trackH));
 
         drawBar(qp, m_v.momentary, bx, barTop, mH, xOf, theme::faint,
                 theme::barTop);
@@ -976,18 +997,18 @@ protected:
 
         qp.setFont(capF);
         qp.setPen(theme::text);
-        qp.drawText(QRect(bx + 4, barTop + 3, 30, 14), Qt::AlignLeft, "M");
-        qp.drawText(QRect(bx + 4, barTop + mH + gap + 6, 30, 14),
+        qp.drawText(QRect(bx + 5, barTop + 2, 30, capH), Qt::AlignLeft, "M");
+        qp.drawText(QRect(bx + 5, barTop + mH + gap + 2, 30, capH),
                     Qt::AlignLeft, "S");
 
         // Scale ticks every 5 LU plus the target itself.
-        const int axisY = barTop + mH + gap + sH + 2;
+        const int axisY = barTop + trackH + 2;
         for (double g = std::ceil(lo / 5.0) * 5.0; g <= hi; g += 5.0) {
             const double x = xOf(g);
             qp.setPen(QPen(theme::grid, 1));
             qp.drawLine(QPointF(x, axisY), QPointF(x, axisY + 4));
             qp.setPen(theme::text);
-            qp.drawText(QRectF(x - 20, axisY + 4, 40, 14), Qt::AlignHCenter,
+            qp.drawText(QRectF(x - 22, axisY + 4, 44, capH), Qt::AlignHCenter,
                         QString::number(g, 'f', 0));
         }
         qp.setPen(QPen(theme::grid, 1));
