@@ -163,10 +163,19 @@ private:
         m_loudQ.clear();
     }
 
+    // Opening a device (or switching the measured pair) hands us a click or
+    // an uninitialised first buffer often enough to matter: fed straight into
+    // the loudness path it pins the true-peak maximum above full scale and
+    // skews integrated loudness for the whole session, since the relative
+    // gate then discards the real programme as "quiet". Drop a short window
+    // rather than making people hit Reset to get honest numbers.
+    static constexpr double kSettleS = 0.3;
+
     void resetLoudnessAccum() {
         std::fill(m_sumSq.begin(), m_sumSq.end(), 0.0);
         m_subN = 0;
         m_subTp = 0.0;
+        m_settle = int(kSettleS * std::max(1, m_format.sampleRate()));
     }
 
     // Caller holds m_mutex. sel < 0 means mix all channels.
@@ -259,12 +268,19 @@ private:
                 m_peakC = magC;
 
             if (!m_loudCh.empty()) {
+                // The filters are driven throughout so their state settles,
+                // but nothing is measured until the settling window expires.
                 for (int c : m_loudCh) {
                     const double k = m_kw[c].step(fr[c]);
+                    const double t = m_tp[c].step(fr[c]);
+                    if (m_settle > 0)
+                        continue;
                     m_sumSq[c] += k * k;
-                    m_subTp = std::max(m_subTp, m_tp[c].step(fr[c]));
+                    m_subTp = std::max(m_subTp, t);
                 }
-                if (++m_subN >= m_subSamples) {
+                if (m_settle > 0) {
+                    --m_settle;
+                } else if (++m_subN >= m_subSamples) {
                     LoudnessBlock b;
                     for (int c : m_loudCh)
                         b.z += m_sumSq[c] / m_subN;
@@ -303,5 +319,6 @@ private:
     std::vector<LoudnessBlock> m_loudQ;
     int m_subSamples = 4800;
     int m_subN = 0;
+    int m_settle = 0;  // frames still to discard after a (re)start
     double m_subTp = 0.0;
 };
