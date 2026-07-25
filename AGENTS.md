@@ -33,8 +33,13 @@ set, hides the cal control, forces `cal = 0`, and selects the metric set;
 mode-specific settings keys are prefixed `program/` by `mkey()` while Acoustic
 keeps the original un-prefixed keys, so existing installs migrate for free.
 Loudness runs off `AudioEngine`'s gapless 100 ms sub-blocks, *not* the
-overlapping FFT windows — integrated loudness must see every sample. See
-`docs/loudness-mode.md` for the full design and the v0.8.0 plan.
+overlapping FFT windows — integrated loudness must see every sample.
+
+**`docs/loudness-mode.md` is the roadmap for this workstream** — the v0.7.0
+design as built, plus the planned v0.8.0 (silence/dropout, stereo tools, LRA)
+and v0.9.0 (per-device playback status). It records decisions *and* the
+options rejected and why; read it before designing anything in this area, and
+keep it current as things land.
 
 ## Build & test
 
