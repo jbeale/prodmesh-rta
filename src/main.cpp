@@ -45,6 +45,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <deque>
 
 #include "api.h"
 #include "audio.h"
@@ -143,6 +144,7 @@ static const MetricInfo kMetricInfos[] = {
     {"dbtp", "True peak (400 ms)", kProgramOnly},
     {"dbtpMax", "True peak — session max", kProgramOnly},
     {"plr", "Peak to loudness ratio", kProgramOnly},
+    {"lra", "Loudness range (LRA)", kProgramOnly},
     {"corr", "Stereo correlation", kProgramOnly},
     {"monoDelta", "Mono compatibility (LU lost)", kProgramOnly},
     {"dbtpL", "True peak — left", kProgramOnly},
@@ -1053,6 +1055,8 @@ public:
             m_metricsEng.resetSession();
             m_loudEng.resetSession();
             m_loudMeter->resetSession();
+            m_overs.clear();
+            m_wasOverTp = false;
             m_breakout->resetMaxima();
         });
         QObject::connect(m_modeCombo, &QComboBox::currentIndexChanged, this,
@@ -1421,6 +1425,7 @@ private:
         if (id == "dbtp") return QString("TRUE PEAK (dBTP)");
         if (id == "dbtpMax") return QString("TP MAX (dBTP)");
         if (id == "plr") return QString("PLR (LU)");
+        if (id == "lra") return QString("LRA (LU)");
         if (id == "corr") return QString("CORRELATION");
         if (id == "monoDelta") return QString("MONO LOSS (LU)");
         if (id == "dbtpL") return QString("TP L (dBTP)");
@@ -1450,6 +1455,7 @@ private:
         if (id == "dbtp") return v.loud.truePeak;
         if (id == "dbtpMax") return v.loud.truePeakMax;
         if (id == "plr") return v.loud.plr;
+        if (id == "lra") return v.loud.range;
         if (id == "corr") return v.correlation;
         if (id == "monoDelta") return v.loud.monoDelta;
         if (id == "dbtpL") return v.loud.truePeakMaxL;
@@ -1778,6 +1784,8 @@ private:
         m_loudVals = LoudnessValues();
         m_loudMeter->setTarget(m_targetLufs, m_ceilDbtp);
         m_loudMeter->resetSession();
+        m_overs.clear();
+        m_wasOverTp = false;
         m_breakout->setSparkCaption(program ? "LOUDNESS — 10 MIN"
                                             : "SPL — 10 MIN");
         // Wipe every accumulated view and statistic: the two modes measure
@@ -2127,8 +2135,25 @@ private:
         if (program) {
             m_breakout->pushSpark(now, m_loudVals.shortTerm);
             m_history->setRange(m_targetLufs - 24.0, m_targetLufs + 9.0);
+            m_history->setTargetLine(m_targetLufs);
             m_history->push(now, m_loudVals.momentary, m_loudVals.shortTerm);
+            // True-peak overshoots: a timestamped record, so there is
+            // something to look at after the service rather than a count that
+            // only says "it happened".
+            const bool over = std::isfinite(m_loudVals.truePeak) &&
+                              m_loudVals.truePeak > m_ceilDbtp;
+            if (over && !m_wasOverTp) {
+                m_overs.push_back({now, m_loudVals.truePeak});
+                while (m_overs.size() > kMaxOvers)
+                    m_overs.pop_front();
+                m_api->broadcastEvent(
+                    "truepeak_over",
+                    QJsonObject{{"dbtp", m_loudVals.truePeak},
+                                {"ceiling_dbtp", m_ceilDbtp}});
+            }
+            m_wasOverTp = over;
         } else {
+            m_history->setTargetLine(kNaN);
             m_breakout->pushSpark(now, res.slow + cal);
             m_history->setRange(cal - 80.0, cal);
             m_history->push(now, res.fast + cal, res.slow + cal);
@@ -2155,6 +2180,9 @@ private:
         snap.lastAudioMs = sig.lastAudioMs;
         snap.signalEnabled = m_signalMon.enabled;
         snap.signalThresholdDb = m_signalMon.thresholdDb;
+        snap.overs.clear();
+        for (const OverEvent &o : m_overs)
+            snap.overs.push_back({o.t, o.dbtp});
         snap.targetLufs = program ? m_targetLufs : kNaN;
         snap.ceilDbtp = program ? m_ceilDbtp : kNaN;
         snap.metrics.clear();
@@ -2175,8 +2203,16 @@ private:
         logTick(now, mv, alarmState);
         if (now - m_lastHistPush >= 1000) {
             m_lastHistPush = now;
+            // Same three slots, different meaning per mode; /api/history
+            // reports which so a consumer can label them.
             m_api->pushHistory(
-                {now, res.fast + cal, res.slow + cal, res.leq + cal, mv.ca});
+                program ? ApiServer::HistSample{now, m_loudVals.momentary,
+                                                m_loudVals.shortTerm,
+                                                m_loudVals.integrated,
+                                                m_loudVals.range}
+                        : ApiServer::HistSample{now, res.fast + cal,
+                                                res.slow + cal,
+                                                res.leq + cal, mv.ca});
         }
         // -UPDATE_MS/2: the check runs on the tick grid, so without slack a
         // 100 ms interval lands on alternating 100/150 ms ticks (~8 Hz).
@@ -2199,6 +2235,14 @@ private:
     double m_targetLufs = -14.0;
     double m_ceilDbtp = -1.0;
     QStringList m_logIds;              // CSV columns, frozen at log start
+    // True-peak overshoot log, bounded — a QC record for after the service.
+    struct OverEvent {
+        qint64 t;
+        double dbtp;
+    };
+    static constexpr size_t kMaxOvers = 500;
+    std::deque<OverEvent> m_overs;
+    bool m_wasOverTp = false;
     SignalMonitor m_signalMon;
     int m_lastSignalState = SignalOk;  // for edge-triggered API events
     QLabel *m_signalBanner = nullptr;
@@ -2418,6 +2462,29 @@ static bool loudnessSelftest() {
     ok = ok && std::fabs(lv.integrated + 14.0) < 0.1 &&
          std::fabs(lv.momentary + 40.0) < 0.05 &&
          std::fabs(lv.shortTerm + 40.0) < 0.05;
+
+    // LRA: equal time at -20 and -30 LUFS is a 10 LU range. Both levels sit
+    // well inside the -20 LU relative gate, so neither is discarded.
+    LoudnessEngine lra;
+    run(lra, -20.0, 120);
+    run(lra, -30.0, 120);
+    lv = lra.values();
+    std::printf("LRA: -20/-30 LUFS programme -> %.2f LU (expected ~10.0)\n",
+                lv.range);
+    ok = ok && std::isfinite(lv.range) && std::fabs(lv.range - 10.0) < 0.6;
+
+    // A steady level has essentially no range, and a programme too short to
+    // characterise reports nothing rather than a misleading small number.
+    LoudnessEngine flat;
+    run(flat, -18.0, 120);
+    const double flatRange = flat.values().range;
+    LoudnessEngine brief;
+    run(brief, -18.0, 5);
+    const double briefRange = brief.values().range;
+    std::printf("LRA: steady programme -> %.2f LU (expected ~0), 5 s "
+                "programme -> %s (expected nan)\n",
+                flatRange, std::isfinite(briefRange) ? "finite" : "nan");
+    ok = ok && std::fabs(flatRange) < 0.3 && !std::isfinite(briefRange);
     return ok;
 }
 

@@ -66,6 +66,12 @@ public:
         qint64 lastAudioMs = 0;
         bool signalEnabled = true;
         double signalThresholdDb = -60.0;
+        // True-peak overshoots this session (program mode).
+        struct Over {
+            qint64 t;
+            double dbtp;
+        };
+        std::vector<Over> overs;
         // Derived SPL metrics (id -> value); see the Metrics dialog for ids.
         std::vector<std::pair<QString, double>> metrics;
         // Traffic-light alarm on one watched metric.
@@ -216,6 +222,10 @@ private:
         return QJsonObject{
             {"target_lufs", jnum(m_snap.targetLufs)},
             {"ceiling_dbtp", jnum(m_snap.ceilDbtp)},
+            {"over_count", int(m_snap.overs.size())},
+            {"last_over_ms", m_snap.overs.empty()
+                                 ? QJsonValue()
+                                 : QJsonValue(m_snap.overs.back().t)},
         };
     }
 
@@ -454,6 +464,16 @@ private:
             o.remove("type");
             return QJsonDocument(o);
         }
+        if (path == "/api/overs") {
+            QJsonArray a;
+            for (const auto &o : m_snap.overs)
+                a.append(QJsonObject{{"t", o.t}, {"dbtp", o.dbtp}});
+            return QJsonDocument(QJsonObject{
+                {"ceiling_dbtp", jnum(m_snap.ceilDbtp)},
+                {"count", a.size()},
+                {"events", a},
+            });
+        }
         if (path == "/api/history") {
             const qint64 since = query.queryItemValue("since_ms").toLongLong();
             qint64 limit = query.hasQueryItem("limit")
@@ -473,7 +493,11 @@ private:
                     {"ca_db", jnum(it->ca)},
                 });
             }
+            // The three series follow the mode: Fast / Slow / Leq in dB SPL
+            // for acoustic, Momentary / Short-term / Integrated in LUFS for
+            // program. Same keys, so switch on `mode` before plotting.
             return QJsonDocument(QJsonObject{
+                {"mode", m_snap.mode},
                 {"interval_ms", 1000},
                 {"count", samples.size()},
                 {"samples", samples},

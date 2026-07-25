@@ -770,6 +770,15 @@ public:
         update();
     }
 
+    // Program mode: the delivery target, with the +/-1 LU band around it, so
+    // the trace can be read against something instead of floating free.
+    void setTargetLine(double lufs) {
+        if (qFuzzyCompare(lufs, m_target))
+            return;
+        m_target = lufs;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter qp(this);
@@ -816,6 +825,18 @@ protected:
                     "-10 min");
         qp.drawText(QRect(left, height() - bottom + 1, w, 14), Qt::AlignRight,
                     "now");
+
+        if (std::isfinite(m_target) && m_target > yMin && m_target < yMax) {
+            const double ty = top + h * (1.0 - (m_target - yMin) / span);
+            const double bandLo =
+                top + h * (1.0 - (m_target - 1.0 - yMin) / span);
+            const double bandHi =
+                top + h * (1.0 - (m_target + 1.0 - yMin) / span);
+            qp.fillRect(QRectF(left, bandHi, w, bandLo - bandHi),
+                        QColor(0x2f, 0xbf, 0x9b, 34));
+            qp.setPen(QPen(theme::bar, 1, Qt::DashLine));
+            qp.drawLine(QPointF(left, ty), QPointF(left + w, ty));
+        }
 
         if (!m_pts.empty()) {
             const qint64 now = m_pts.back().t;
@@ -865,6 +886,7 @@ private:
 
     std::deque<Pt> m_pts;
     double m_yMin = 20.0, m_yMax = 120.0;
+    double m_target = kNaN;
 };
 
 // ---------------------------------------------------------------------------

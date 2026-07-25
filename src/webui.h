@@ -99,7 +99,8 @@ const TILES = {
   },
   program: {
     big: ["lufsM", "lufsS", "lufsI"],
-    small: ["toTarget", "dbtp", "dbtpMax", "plr", "laf", "las", "leq", "lzpk"],
+    small: ["toTarget", "lra", "plr", "monoDelta", "corr", "balance",
+            "dbtp", "dbtpMax", "dbtpL", "dbtpR"],
   },
 };
 let MODE = "acoustic";
@@ -117,6 +118,8 @@ function caption(id, w, mode) {
     lufsM: "M — 400 ms (LUFS)", lufsS: "S — 3 s (LUFS)",
     lufsI: "INTEGRATED (LUFS)", toTarget: "Δ TARGET (LU)",
     dbtp: "TRUE PEAK (dBTP)", dbtpMax: "TP MAX (dBTP)", plr: "PLR (LU)",
+    lra: "LRA (LU)", monoDelta: "MONO LOSS (LU)", corr: "CORRELATION",
+    balance: "BALANCE (dB)", dbtpL: "TP L (dBTP)", dbtpR: "TP R (dBTP)",
   };
   return map[id] || id;
 }

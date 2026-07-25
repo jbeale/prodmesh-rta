@@ -22,6 +22,7 @@ struct LoudnessValues {
     double truePeakMaxL = kNaN, truePeakMaxR = kNaN;  // per channel
     double plr = kNaN;          // peak-to-loudness ratio, LU
     double monoDelta = kNaN;    // LU lost when summed to mono (<= 0)
+    double range = kNaN;        // LRA, LU
 };
 
 struct MetricValues {
@@ -305,6 +306,8 @@ public:
     void resetSession() {
         m_binN.assign(kBins, 0);
         m_binP.assign(kBins, 0.0);
+        m_lraN.assign(kBins, 0);
+        m_lraP.assign(kBins, 0.0);
         m_tpMax = 0.0;
         m_tpMaxL = 0.0;
         m_tpMaxR = 0.0;
@@ -321,12 +324,17 @@ public:
         if (m_sub.size() >= size_t(kMomSubs)) {
             const double z = meanZ(kMomSubs);
             const double l = loudness(z);
-            if (l > kAbsGate) {
-                const int i =
-                    std::clamp(int((l - kBinLo) / kBinW), 0, kBins - 1);
-                ++m_binN[i];
-                m_binP[i] += z;
-            }
+            if (l > kAbsGate)
+                addTo(m_binN, m_binP, l, z);
+        }
+        // LRA runs off the short-term series instead, at the same 100 ms hop
+        // (far more overlap than the 2/3 EBU Tech 3342 asks for, which only
+        // sharpens the distribution).
+        if (m_sub.size() >= size_t(kShortSubs)) {
+            const double z = meanZ(kShortSubs);
+            const double l = loudness(z);
+            if (l > kAbsGate)
+                addTo(m_lraN, m_lraP, l, z);
         }
     }
 
@@ -358,6 +366,7 @@ public:
             }
         }
         v.integrated = integrated();
+        v.range = loudnessRange();
         if (m_tpMax > 0.0)
             v.truePeakMax = 20.0 * std::log10(m_tpMax);
         if (m_tpMaxL > 0.0)
@@ -381,6 +390,53 @@ private:
         for (size_t i = m_sub.size() - n; i < m_sub.size(); ++i)
             s += m_sub[i].z;
         return s / n;
+    }
+
+    static void addTo(std::vector<qint64> &n, std::vector<double> &p, double l,
+                      double z) {
+        const int i = std::clamp(int((l - kBinLo) / kBinW), 0, kBins - 1);
+        ++n[i];
+        p[i] += z;
+    }
+
+    static double binCentre(int i) { return kBinLo + (i + 0.5) * kBinW; }
+
+    // EBU Tech 3342 loudness range: the spread of the short-term distribution
+    // after gating, 10th to 95th percentile. Note the relative gate is -20 LU
+    // here, not the -10 LU the integrated measurement uses — LRA is trying to
+    // describe the programme's dynamics, so it keeps more of the quiet
+    // material that integrated loudness deliberately discards.
+    double loudnessRange() const {
+        qint64 nA = 0;
+        double pA = 0.0;
+        for (int i = 0; i < kBins; ++i) {
+            nA += m_lraN[i];
+            pA += m_lraP[i];
+        }
+        // A range needs a distribution: 10 s of short-term values at the
+        // 100 ms hop. Below that the number is noise dressed as a statistic.
+        if (nA < 100)
+            return kNaN;
+        const double relGate = loudness(pA / double(nA)) - 20.0;
+        qint64 nR = 0;
+        for (int i = 0; i < kBins; ++i)
+            if (binCentre(i) > relGate)
+                nR += m_lraN[i];
+        if (nR < 2)
+            return kNaN;
+        auto pct = [&](double frac) {
+            const qint64 want = qint64(std::llround(frac * double(nR - 1)));
+            qint64 seen = 0;
+            for (int i = 0; i < kBins; ++i) {
+                if (binCentre(i) <= relGate || m_lraN[i] == 0)
+                    continue;
+                seen += m_lraN[i];
+                if (seen > want)
+                    return binCentre(i);
+            }
+            return binCentre(kBins - 1);
+        };
+        return pct(0.95) - pct(0.10);
     }
 
     double integrated() const {
@@ -410,6 +466,8 @@ private:
     std::deque<LoudnessBlock> m_sub;
     std::vector<qint64> m_binN = std::vector<qint64>(kBins, 0);
     std::vector<double> m_binP = std::vector<double>(kBins, 0.0);
+    std::vector<qint64> m_lraN = std::vector<qint64>(kBins, 0);
+    std::vector<double> m_lraP = std::vector<double>(kBins, 0.0);
     double m_tpMax = 0.0;
     double m_tpMaxL = 0.0, m_tpMaxR = 0.0;
 };
