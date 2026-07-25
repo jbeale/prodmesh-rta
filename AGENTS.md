@@ -9,9 +9,9 @@ go in the C++ app only; keep the Python version untouched unless fixing a bug.
 
 | File | Contents |
 |---|---|
-| `src/dsp.h` | FFT, A/C/Z weighting, `Analyzer` (bands + hi-res spectrum), `CWeightFilter` |
-| `src/audio.h` | `AudioEngine`: QAudioSource capture ring, channel select, peak tracking |
-| `src/metrics.h` | `MetricsEngine`: rolling Leq, percentiles, dose (pure math, no Qt GUI) |
+| `src/dsp.h` | FFT, A/C/Z weighting, `Analyzer` (bands + hi-res spectrum), `CWeightFilter`, `KWeightFilter`, `TruePeakDetector` |
+| `src/audio.h` | `AudioEngine`: QAudioSource interleaved capture ring, channel select, peak tracking, loudness sub-blocks |
+| `src/metrics.h` | `MetricsEngine` (rolling Leq, percentiles, dose) and `LoudnessEngine` (BS.1770 M/S/I, true peak) — pure math, no Qt GUI |
 | `src/widgets.h` | All custom views: RTA, spectrogram, history, readouts, breakout window |
 | `src/api.h` | `ApiServer`: hand-rolled HTTP + WebSocket (RFC 6455) on QTcpServer |
 | `src/webui.h` | The dashboard page as one inline HTML string (self-contained, no CDNs) |
@@ -23,7 +23,18 @@ Data flow, once per 50 ms tick: `AudioEngine::latest()` → `Analyzer::process()
 To add a metric: `MetricValues` + `MetricsEngine` (metrics.h), then
 `kMetricInfos`, `metricCaption`, `metricValue`, `metricSuffix` (main.cpp),
 and the id lists in `webui.h`. Everything else (settings dialog, breakout,
-CSV log, API) picks it up from the registry.
+CSV log, API) picks it up from the registry. Each `kMetricInfos` entry carries
+a **mode bitmask** — every site that iterates the registry must filter with
+`metricInMode()`, or the metric leaks into the mode it makes no sense in.
+
+**Modes**: `ModeAcoustic` (mic in a room, dB SPL via the cal offset) and
+`ModeProgram` (digital bus, LUFS against full scale). The mode gates the tab
+set, hides the cal control, forces `cal = 0`, and selects the metric set;
+mode-specific settings keys are prefixed `program/` by `mkey()` while Acoustic
+keeps the original un-prefixed keys, so existing installs migrate for free.
+Loudness runs off `AudioEngine`'s gapless 100 ms sub-blocks, *not* the
+overlapping FFT windows — integrated loudness must see every sample. See
+`docs/loudness-mode.md` for the full design and the v0.8.0 plan.
 
 ## Build & test
 

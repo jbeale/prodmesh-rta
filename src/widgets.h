@@ -23,6 +23,7 @@
 #include <functional>
 
 #include "dsp.h"
+#include "metrics.h"
 
 inline QString xAxisLabel(double center) {
     if (center == 31.5) return "31";
@@ -844,6 +845,187 @@ private:
 
 // ---------------------------------------------------------------------------
 
+// EBU R128-style loudness meter (Program mode): the gated Integrated value
+// large on the left, momentary and short-term bars sharing one LUFS scale on
+// the right, the target zone shaded, and a true-peak indicator that counts
+// crossings of the ceiling.
+//
+// The scale follows the target rather than being fixed, so -14 (streaming)
+// and -23 (broadcast) both land mid-scale.
+class LoudnessMeter : public QWidget {
+public:
+    LoudnessMeter() { setMinimumHeight(170); }
+
+    void setValues(const LoudnessValues &v) {
+        // Rising edge only, so one long overshoot counts as one event.
+        const bool over = std::isfinite(v.truePeak) && v.truePeak > m_ceil;
+        if (over && !m_wasOver)
+            ++m_over;
+        m_wasOver = over;
+        m_v = v;
+        update();
+    }
+
+    void setTarget(double lufs, double ceilDbtp) {
+        m_target = lufs;
+        m_ceil = ceilDbtp;
+        update();
+    }
+
+    void resetSession() {
+        m_over = 0;
+        m_wasOver = false;
+        update();
+    }
+
+    int overCount() const { return m_over; }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter qp(this);
+        qp.fillRect(rect(), theme::bg);
+        const int left = 14, top = 10;
+        const int w = width() - left - 14;
+        const int h = height() - top - 10;
+        if (w < 240 || h < 90)
+            return;
+
+        QFont capF = font();
+        capF.setPointSize(9);
+        QFont numF = font();
+        numF.setFamilies({"Consolas", "Menlo", "Courier New"});
+        numF.setBold(true);
+
+        // --- left panel: the number people actually read ---
+        const int panelW = std::min(320, w * 2 / 5);
+        qp.setFont(capF);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(left, top, panelW, 14), Qt::AlignLeft, "INTEGRATED");
+
+        const double d = std::isfinite(m_v.integrated)
+                             ? m_v.integrated - m_target
+                             : kNaN;
+        numF.setPointSize(34);
+        qp.setFont(numF);
+        qp.setPen(QColor(deltaColor(d)));
+        qp.drawText(QRect(left, top + 14, panelW, 46), Qt::AlignLeft,
+                    std::isfinite(m_v.integrated)
+                        ? QString::number(m_v.integrated, 'f', 1) + " LUFS"
+                        : QString("--.- LUFS"));
+
+        qp.setFont(capF);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(left, top + 62, panelW, 14), Qt::AlignLeft,
+                    std::isfinite(d)
+                        ? QString("target %1  ·  %2%3 LU")
+                              .arg(m_target, 0, 'f', 1)
+                              .arg(d >= 0 ? "+" : "")
+                              .arg(d, 0, 'f', 1)
+                        : QString("target %1 LUFS").arg(m_target, 0, 'f', 1));
+
+        // True peak, with the ceiling it is being judged against.
+        const bool tpOver = std::isfinite(m_v.truePeakMax) &&
+                            m_v.truePeakMax > m_ceil;
+        qp.setPen(theme::text);
+        qp.drawText(QRect(left, top + 84, panelW, 14), Qt::AlignLeft,
+                    QString("TRUE PEAK  (ceiling %1 dBTP)")
+                        .arg(m_ceil, 0, 'f', 1));
+        numF.setPointSize(15);
+        qp.setFont(numF);
+        qp.setPen(QColor(tpOver ? "#e05c5c" : "#e8ecf4"));
+        qp.drawText(QRect(left, top + 98, panelW, 22), Qt::AlignLeft,
+                    std::isfinite(m_v.truePeakMax)
+                        ? QString("%1 dBTP").arg(m_v.truePeakMax, 0, 'f', 1)
+                        : QString("--.- dBTP"));
+        if (m_over > 0) {
+            qp.setFont(capF);
+            qp.setPen(QColor("#e05c5c"));
+            qp.drawText(QRect(left + 110, top + 102, panelW - 110, 16),
+                        Qt::AlignLeft,
+                        QString("%1 over").arg(m_over));
+        }
+
+        // --- right: M / S bars on a target-centred LUFS scale ---
+        const int bx = left + panelW + 10;
+        const int bw = w - panelW - 10;
+        if (bw < 120)
+            return;
+        const double lo = m_target - 24.0, hi = m_target + 9.0;
+        auto xOf = [&](double l) {
+            return bx + bw * std::clamp((l - lo) / (hi - lo), 0.0, 1.0);
+        };
+
+        const int barTop = top + 4;
+        const int mH = 20, sH = 28, gap = 6;
+        const QRect track(bx, barTop, bw, mH + gap + sH);
+        qp.fillRect(track, QColor("#1b1f28"));
+
+        // Target band (+/- 1 LU is the tolerance broadcast specs use).
+        qp.fillRect(QRectF(xOf(m_target - 1.0), barTop,
+                           xOf(m_target + 1.0) - xOf(m_target - 1.0),
+                           mH + gap + sH),
+                    QColor(0x2f, 0xbf, 0x9b, 40));
+        qp.setPen(QPen(theme::bar, 1, Qt::DashLine));
+        qp.drawLine(QPointF(xOf(m_target), barTop),
+                    QPointF(xOf(m_target), barTop + mH + gap + sH));
+
+        drawBar(qp, m_v.momentary, bx, barTop, mH, xOf, theme::faint,
+                theme::barTop);
+        drawBar(qp, m_v.shortTerm, bx, barTop + mH + gap, sH, xOf, theme::bar,
+                theme::barTop);
+
+        qp.setFont(capF);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(bx + 4, barTop + 3, 30, 14), Qt::AlignLeft, "M");
+        qp.drawText(QRect(bx + 4, barTop + mH + gap + 6, 30, 14),
+                    Qt::AlignLeft, "S");
+
+        // Scale ticks every 5 LU plus the target itself.
+        const int axisY = barTop + mH + gap + sH + 2;
+        for (double g = std::ceil(lo / 5.0) * 5.0; g <= hi; g += 5.0) {
+            const double x = xOf(g);
+            qp.setPen(QPen(theme::grid, 1));
+            qp.drawLine(QPointF(x, axisY), QPointF(x, axisY + 4));
+            qp.setPen(theme::text);
+            qp.drawText(QRectF(x - 20, axisY + 4, 40, 14), Qt::AlignHCenter,
+                        QString::number(g, 'f', 0));
+        }
+        qp.setPen(QPen(theme::grid, 1));
+        qp.setBrush(Qt::NoBrush);
+        qp.drawRect(track);
+    }
+
+private:
+    // Green inside +/-1 LU of target, amber to +/-3, red beyond — the same
+    // traffic-light convention as the SPL alarms.
+    static const char *deltaColor(double d) {
+        if (!std::isfinite(d))
+            return "#e8ecf4";
+        const double a = std::fabs(d);
+        return a <= 1.0 ? "#2fbf9b" : a <= 3.0 ? "#e8c84b" : "#e05c5c";
+    }
+
+    template <typename FX>
+    void drawBar(QPainter &qp, double v, int bx, int y, int hgt, FX xOf,
+                 const QColor &body, const QColor &tip) {
+        if (!std::isfinite(v))
+            return;
+        const double x = xOf(v);
+        if (x <= bx + 1)
+            return;
+        qp.fillRect(QRectF(bx, y, x - bx, hgt), body);
+        qp.fillRect(QRectF(x - 2, y, 2, hgt), tip);
+    }
+
+    LoudnessValues m_v;
+    double m_target = -14.0;
+    double m_ceil = -1.0;
+    int m_over = 0;
+    bool m_wasOver = false;
+};
+
+// ---------------------------------------------------------------------------
+
 // Traffic-light alarm states shared by the readout widgets: 0 = normal,
 // 1 = warning (yellow), 2 = alert (red).
 inline const char *alarmColor(int state) {
@@ -1083,6 +1265,20 @@ public:
         update();
     }
 
+    // What the trace is: SPL in Acoustic mode, short-term loudness in
+    // Program mode.
+    void setCaption(const QString &c) {
+        if (c == m_caption)
+            return;
+        m_caption = c;
+        update();
+    }
+
+    void clear() {
+        m_pts.clear();
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter qp(this);
@@ -1094,8 +1290,7 @@ protected:
         f.setPointSize(8);
         qp.setFont(f);
         qp.setPen(theme::text);
-        qp.drawText(QRect(14, 6, width() - 28, 14), Qt::AlignLeft,
-                    "SPL — 10 MIN");
+        qp.drawText(QRect(14, 6, width() - 28, 14), Qt::AlignLeft, m_caption);
 
         const int left = 14, right = 14, top = 24, bottom = 10;
         const int w = width() - left - right;
@@ -1142,6 +1337,7 @@ private:
         qint64 t;
         double v;
     };
+    QString m_caption = "SPL — 10 MIN";
     std::deque<Pt> m_pts;
 };
 
@@ -1183,6 +1379,7 @@ public:
         for (const QString &id : ids) {
             if (id == "spark") {
                 m_spark = new SparkTile;
+                m_spark->setCaption(m_sparkCaption);
                 m_tilesLay->addWidget(m_spark);
             } else {
                 auto *t = new MetricTile;
@@ -1207,6 +1404,12 @@ public:
                 t->setAlarmState(v.alarm);
                 t->setTarget(v.tgtLo, v.tgtHi);
             }
+    }
+
+    void setSparkCaption(const QString &c) {
+        m_sparkCaption = c;
+        if (m_spark)
+            m_spark->setCaption(c);
     }
 
     void pushSpark(qint64 t, double splDb) {
@@ -1234,6 +1437,7 @@ private:
     QVBoxLayout *m_tilesLay;
     QHash<QString, MetricTile *> m_tiles;
     SparkTile *m_spark = nullptr;
+    QString m_sparkCaption = "SPL — 10 MIN";
     QCheckBox *m_onTop;
     int m_valuePt = 32;
 };

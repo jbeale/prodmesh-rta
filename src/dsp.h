@@ -127,6 +127,141 @@ private:
     double m_gain = 1.0;
 };
 
+// Biquad in transposed direct form II (one state pair, good float behaviour).
+struct Biquad {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
+    double z1 = 0.0, z2 = 0.0;
+
+    void reset() { z1 = z2 = 0.0; }
+
+    double step(double x) {
+        const double y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
+};
+
+// ITU-R BS.1770 K-weighting: a ~+4 dB high shelf (the "head" filter) over a
+// ~38 Hz high-pass (RLB). The standard only publishes a 48 kHz coefficient
+// table, so the analog prototypes are re-derived here by bilinear transform
+// at the actual capture rate; selftest() cross-checks the design against that
+// table. Gain at 1 kHz is +0.69 dB, which is what the -0.691 LUFS offset in
+// LoudnessEngine cancels.
+class KWeightFilter {
+public:
+    void design(double fs) {
+        {  // stage 1 — high shelf
+            constexpr double f0 = 1681.974450955533;
+            constexpr double G = 3.999843853973347;  // dB
+            constexpr double Q = 0.7071752369554196;
+            const double K = std::tan(kPi * f0 / fs);
+            const double Vh = std::pow(10.0, G / 20.0);
+            const double Vb = std::pow(Vh, 0.4996667741545416);
+            const double a0 = 1.0 + K / Q + K * K;
+            m_shelf.b0 = (Vh + Vb * K / Q + K * K) / a0;
+            m_shelf.b1 = 2.0 * (K * K - Vh) / a0;
+            m_shelf.b2 = (Vh - Vb * K / Q + K * K) / a0;
+            m_shelf.a1 = 2.0 * (K * K - 1.0) / a0;
+            m_shelf.a2 = (1.0 - K / Q + K * K) / a0;
+        }
+        {  // stage 2 — RLB high-pass; its numerator is exactly (1, -2, 1)
+            constexpr double f0 = 38.13547087602444;
+            constexpr double Q = 0.5003270373238773;
+            const double K = std::tan(kPi * f0 / fs);
+            const double a0 = 1.0 + K / Q + K * K;
+            m_hp.b0 = 1.0;
+            m_hp.b1 = -2.0;
+            m_hp.b2 = 1.0;
+            m_hp.a1 = 2.0 * (K * K - 1.0) / a0;
+            m_hp.a2 = (1.0 - K / Q + K * K) / a0;
+        }
+        reset();
+    }
+
+    void reset() {
+        m_shelf.reset();
+        m_hp.reset();
+    }
+
+    double step(double x) { return m_hp.step(m_shelf.step(x)); }
+
+    const Biquad &shelf() const { return m_shelf; }
+    const Biquad &highpass() const { return m_hp; }
+
+private:
+    Biquad m_shelf, m_hp;
+};
+
+// True-peak detection by 4x oversampling, as BS.1770 requires — lossy
+// encoders reconstruct the inter-sample peaks that plain sample-peak metering
+// misses, so a stream that reads -0.5 dBFS can still clip after AAC.
+//
+// The polyphase interpolator is a windowed sinc designed at construction:
+// phase p tap j is sinc((j - c) + p/4) windowed by a centered Blackman, i.e.
+// band-limited reconstruction cut at the original Nyquist. Phase 0 collapses
+// to the input sample itself, so sample peaks are always included.
+class TruePeakDetector {
+public:
+    static constexpr int PHASES = 4;
+    static constexpr int TAPS = 32;  // power of two: index masking
+
+    TruePeakDetector() {
+        constexpr int c = TAPS / 2;
+        constexpr double half = TAPS / 2.0;
+        for (int p = 0; p < PHASES; ++p) {
+            for (int j = 0; j < TAPS; ++j) {
+                const double t = double(j - c) + double(p) / PHASES;
+                const double s = std::fabs(t) < 1e-12
+                                     ? 1.0
+                                     : std::sin(kPi * t) / (kPi * t);
+                const double w =
+                    std::fabs(t) >= half
+                        ? 0.0
+                        : 0.42 + 0.5 * std::cos(kPi * t / half) +
+                              0.08 * std::cos(2.0 * kPi * t / half);
+                m_h[p][j] = s * w;
+            }
+        }
+        reset();
+    }
+
+    void reset() {
+        for (double &d : m_d)
+            d = 0.0;
+        m_idx = 0;
+    }
+
+    // Largest interpolated magnitude in the span ending at this sample.
+    double step(double x) {
+        m_idx = (m_idx + 1) & (TAPS - 1);
+        m_d[m_idx] = x;
+        double peak = 0.0;
+        for (int p = 0; p < PHASES; ++p) {
+            double acc = 0.0;
+            for (int j = 0; j < TAPS; ++j)
+                acc += m_h[p][j] * m_d[(m_idx - j + TAPS) & (TAPS - 1)];
+            peak = std::max(peak, std::fabs(acc));
+        }
+        return peak;
+    }
+
+private:
+    double m_h[PHASES][TAPS] = {};
+    double m_d[TAPS] = {};
+    int m_idx = 0;
+};
+
+// One 100 ms loudness sub-block: the channel-summed mean square of the
+// K-weighted signal (BS.1770 z, with G = 1.0 for L/R) plus the largest true
+// peak in the block. Produced gaplessly on the capture side, because
+// integrated loudness must see every sample rather than the overlapping FFT
+// windows the RTA path grabs.
+struct LoudnessBlock {
+    double z = 0.0;      // sum over channels of mean-square K-weighted
+    double tpLin = 0.0;  // max |interpolated sample|, linear
+};
+
 struct AnalyzerResult {
     double fast = kNaN;
     double slow = kNaN;

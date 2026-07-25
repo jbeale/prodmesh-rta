@@ -102,28 +102,70 @@ QStatusBar { color: #8a92a6; }
 QToolTip { background: #232733; color: #c8cede; border: 1px solid #46506a; }
 )";
 
+// What the app is measuring. Acoustic is a microphone in a room, where every
+// level is anchored to 20 uPa by the cal offset. Program is a digital bus (a
+// stream or console feed), where full scale is the reference, there is
+// nothing to calibrate, and loudness replaces the exposure metrics.
+enum AppMode { ModeAcoustic = 0, ModeProgram = 1 };
+
+static constexpr int kAcousticOnly = 1;
+static constexpr int kProgramOnly = 2;
+static constexpr int kBothModes = kAcousticOnly | kProgramOnly;
+
 // Metric registry: ids for config/persistence/API, names for the settings
-// dialog. Captions, values, and suffixes are resolved by MainWindow since
-// they depend on the display weighting and configured Leq windows.
+// dialog, and which modes the metric means anything in. Captions, values, and
+// suffixes are resolved by MainWindow since they depend on the display
+// weighting and configured Leq windows.
 struct MetricInfo {
     const char *id;
     const char *name;
+    int modes;  // bitmask of kAcousticOnly / kProgramOnly
 };
 static const MetricInfo kMetricInfos[] = {
-    {"laf", "Fast (displayed weighting)"},
-    {"las", "Slow (displayed weighting)"},
-    {"leq", "Leq — session"},
-    {"leqS", "LAeq — short window"},
-    {"leqL", "LAeq — long window"},
-    {"lzpk", "Peak (Z, unweighted)"},
-    {"lcpk", "Peak (C-weighted)"},
-    {"ca", "C-A ratio (short window)"},
-    {"l10", "L10 — session"},
-    {"l50", "L50 — session"},
-    {"l90", "L90 — session"},
-    {"doseN", "Dose (NIOSH 85/3)"},
-    {"doseO", "Dose (OSHA 90/5)"},
+    // Levels are just levels: in Program mode cal is 0, so they read dBFS.
+    {"laf", "Fast (displayed weighting)", kBothModes},
+    {"las", "Slow (displayed weighting)", kBothModes},
+    {"leq", "Leq — session", kBothModes},
+    {"lzpk", "Peak (Z, unweighted)", kBothModes},
+    {"leqS", "LAeq — short window", kAcousticOnly},
+    {"leqL", "LAeq — long window", kAcousticOnly},
+    {"lcpk", "Peak (C-weighted)", kAcousticOnly},
+    {"ca", "C-A ratio (short window)", kAcousticOnly},
+    {"l10", "L10 — session", kAcousticOnly},
+    {"l50", "L50 — session", kAcousticOnly},
+    {"l90", "L90 — session", kAcousticOnly},
+    {"doseN", "Dose (NIOSH 85/3)", kAcousticOnly},
+    {"doseO", "Dose (OSHA 90/5)", kAcousticOnly},
+    {"lufsM", "Momentary loudness (400 ms)", kProgramOnly},
+    {"lufsS", "Short-term loudness (3 s)", kProgramOnly},
+    {"lufsI", "Integrated loudness (gated)", kProgramOnly},
+    {"toTarget", "Distance to target", kProgramOnly},
+    {"dbtp", "True peak (400 ms)", kProgramOnly},
+    {"dbtpMax", "True peak — session max", kProgramOnly},
+    {"plr", "Peak to loudness ratio", kProgramOnly},
 };
+
+static bool metricInMode(const MetricInfo &mi, int mode) {
+    return (mi.modes &
+            (mode == ModeProgram ? kProgramOnly : kAcousticOnly)) != 0;
+}
+
+// Delivery targets. Streaming platforms normalise *down* to their target, so
+// going louder than it only costs dynamics; broadcast specs are two-sided.
+struct LoudnessTarget {
+    const char *name;
+    double lufs;
+    double ceilDbtp;
+};
+static const LoudnessTarget kLoudnessTargets[] = {
+    {"YouTube / Spotify / Twitch (-14 LUFS)", -14.0, -1.0},
+    {"Apple Podcasts (-16 LUFS)", -16.0, -1.0},
+    {"EBU R128 broadcast (-23 LUFS)", -23.0, -1.0},
+    {"ATSC A/85 (-24 LKFS)", -24.0, -2.0},
+    {"Custom", -14.0, -1.0},
+};
+static constexpr int kCustomTargetIdx =
+    int(sizeof(kLoudnessTargets) / sizeof(kLoudnessTargets[0])) - 1;
 
 static QString windowLabel(int secs) {
     if (secs % 3600 == 0)
@@ -277,7 +319,7 @@ private:
 
 class MetricsDialog : public QDialog {
 public:
-    MetricsDialog(QWidget *parent, const QStringList &mainIds,
+    MetricsDialog(QWidget *parent, int mode, const QStringList &mainIds,
                   const QStringList &breakoutIds, int shortS, int longS,
                   const QHash<QString, QPair<double, double>> &targets,
                   int sizeIdx)
@@ -293,6 +335,8 @@ public:
         grid->addWidget(new QLabel("<b>Target range</b>"), 0, 3);
         int row = 1;
         for (const MetricInfo &mi : kMetricInfos) {
+            if (!metricInMode(mi, mode))
+                continue;
             grid->addWidget(new QLabel(mi.name), row, 0);
             auto *cm = new QCheckBox;
             cm->setChecked(mainIds.contains(mi.id));
@@ -336,12 +380,16 @@ public:
         for (int s : {10, 30, 60, 300})
             m_shortCombo->addItem(windowLabel(s), s);
         selectData(m_shortCombo, shortS);
-        form->addRow("Short Leq window:", m_shortCombo);
         m_longCombo = new QComboBox;
         for (int s : {300, 600, 900, 1800, 3600})
             m_longCombo->addItem(windowLabel(s), s);
         selectData(m_longCombo, longS);
-        form->addRow("Long Leq window:", m_longCombo);
+        // The rolling Leq windows only feed acoustic metrics; loudness
+        // integration times are fixed by BS.1770.
+        if (mode != ModeProgram) {
+            form->addRow("Short Leq window:", m_shortCombo);
+            form->addRow("Long Leq window:", m_longCombo);
+        }
         m_sizeCombo = new QComboBox;
         m_sizeCombo->addItems({"Small", "Medium", "Large"});
         m_sizeCombo->setCurrentIndex(std::clamp(sizeIdx, 0, 2));
@@ -349,11 +397,19 @@ public:
         root->addLayout(form);
 
         auto *hint = new QLabel(
-            "Session metrics (Leq, L10/L50/L90, dose) reset with the Reset\n"
-            "button. Dose assumes the Cal offset gives true dB SPL.\n"
-            "Target ranges draw a gauge under the readout: green in the\n"
-            "band, amber outside. E.g. C-A ratio 8–12 dB keeps low-end\n"
-            "energy in the range that avoids \"it's too loud\" complaints.");
+            mode == ModeProgram
+                ? "Integrated loudness and the true-peak maximum are session\n"
+                  "metrics — they reset with the Reset button, so start a\n"
+                  "fresh session when the stream starts.\n"
+                  "Target ranges draw a gauge under the readout: green in\n"
+                  "the band, amber outside. E.g. Integrated -15 to -13 LUFS\n"
+                  "keeps a stream inside YouTube's normalisation window."
+                : "Session metrics (Leq, L10/L50/L90, dose) reset with the\n"
+                  "Reset button. Dose assumes the Cal offset gives true dB\n"
+                  "SPL. Target ranges draw a gauge under the readout: green\n"
+                  "in the band, amber outside. E.g. C-A ratio 8–12 dB keeps\n"
+                  "low-end energy in the range that avoids \"it's too loud\"\n"
+                  "complaints.");
         hint->setStyleSheet("color:#8a92a6; font-size:11px;");
         root->addWidget(hint);
 
@@ -403,7 +459,7 @@ private:
 
     static QDoubleSpinBox *makeSpin() {
         auto *s = new QDoubleSpinBox;
-        s->setRange(-20.0, 140.0);
+        s->setRange(-70.0, 140.0);  // spans dB SPL and LUFS/dBTP
         s->setDecimals(1);
         s->setFixedWidth(72);
         return s;
@@ -428,10 +484,11 @@ private:
 
 class AlarmsDialog : public QDialog {
 public:
-    AlarmsDialog(QWidget *parent, bool enabled, const QString &metricId,
-                 double warnDb, double alertDb)
+    AlarmsDialog(QWidget *parent, int mode, bool enabled,
+                 const QString &metricId, double warnDb, double alertDb)
         : QDialog(parent) {
-        setWindowTitle("SPL Alarms");
+        const bool program = mode == ModeProgram;
+        setWindowTitle(program ? "Loudness Alarms" : "SPL Alarms");
         auto *form = new QFormLayout(this);
 
         enableCheck = new QCheckBox("Color readouts when levels get high");
@@ -440,30 +497,38 @@ public:
 
         metricCombo = new QComboBox;
         for (const MetricInfo &mi : kMetricInfos)
-            metricCombo->addItem(mi.name, QString(mi.id));
+            if (metricInMode(mi, mode))
+                metricCombo->addItem(mi.name, QString(mi.id));
         const int i = metricCombo->findData(metricId);
         if (i >= 0)
             metricCombo->setCurrentIndex(i);
         form->addRow("Watch metric:", metricCombo);
 
+        // Loudness thresholds are negative (LUFS/dBTP); SPL ones are not.
+        const double lo = program ? -60.0 : 40.0;
         warnSpin = new QDoubleSpinBox;
-        warnSpin->setRange(40.0, 140.0);
+        warnSpin->setRange(lo, 140.0);
         warnSpin->setDecimals(1);
-        warnSpin->setSuffix(" dB");
+        warnSpin->setSuffix(program ? "" : " dB");
         warnSpin->setValue(warnDb);
         form->addRow("Warning (yellow) at:", warnSpin);
 
         alertSpin = new QDoubleSpinBox;
-        alertSpin->setRange(40.0, 140.0);
+        alertSpin->setRange(lo, 140.0);
         alertSpin->setDecimals(1);
-        alertSpin->setSuffix(" dB");
+        alertSpin->setSuffix(program ? "" : " dB");
         alertSpin->setValue(alertDb);
         form->addRow("Alert (red) at:", alertSpin);
 
         auto *hint = new QLabel(
-            "Traffic-light coloring on the watched metric, everywhere it is\n"
-            "displayed (top bar, breakout, web dashboard, API). Typical show\n"
-            "limits: warn 95-99, alert 102-103 dBA LAeq.");
+            program
+                ? "Traffic-light coloring on the watched metric, everywhere\n"
+                  "it is displayed (top bar, breakout, web dashboard, API).\n"
+                  "For a -14 LUFS stream: warn at -12, alert at -9 on the\n"
+                  "short-term level, or watch true peak against -1 dBTP."
+                : "Traffic-light coloring on the watched metric, everywhere\n"
+                  "it is displayed (top bar, breakout, web dashboard, API).\n"
+                  "Typical show limits: warn 95-99, alert 102-103 dBA LAeq.");
         hint->setStyleSheet("color:#8a92a6; font-size:11px;");
         form->addRow(hint);
 
@@ -595,7 +660,8 @@ public:
         m_weightCombo->addItems({"A", "C", "Z"});
         ctl->addWidget(m_weightCombo);
         ctl->addSpacing(12);
-        ctl->addWidget(new QLabel("Cal:"));
+        m_calLbl = new QLabel("Cal:");
+        ctl->addWidget(m_calLbl);
         m_calSpin = new QDoubleSpinBox;
         m_calSpin->setRange(0.0, 200.0);
         m_calSpin->setDecimals(1);
@@ -635,6 +701,13 @@ public:
         // in/out of the splitter on tab change — history travels with them.
         m_split = new QSplitter(Qt::Vertical);
         m_split->setChildrenCollapsible(false);
+        // Program-mode loudness view. Built always, but only added to the tab
+        // bar in Program mode (see applyMode).
+        m_loudMeter = new LoudnessMeter;
+        m_loudPage = new QWidget;
+        auto *loudLay = new QVBoxLayout(m_loudPage);
+        loudLay->setContentsMargins(0, 4, 0, 0);
+        loudLay->addWidget(m_loudMeter, 1);
         m_tabs = new QTabWidget;
         m_tabs->addTab(rtaPage, "RTA");
         m_tabs->addTab(spectroPage, "Spectrogram");
@@ -726,6 +799,73 @@ public:
         QObject::connect(dispBtns, &QDialogButtonBox::rejected, m_displayDlg,
                          &QWidget::hide);
         dispLay->addWidget(dispBtns);
+
+        // --- Input & Mode dialog (Settings -> Input & Mode…) ---
+        // The mode changes what the app *is*, so it lives in a dialog rather
+        // than on the toolbar — nobody should flip it by brushing a control
+        // mid-service.
+        m_inputDlg = new QDialog(this);
+        m_inputDlg->setWindowTitle("Input & Mode");
+        auto *inLay = new QVBoxLayout(m_inputDlg);
+        auto *modeGroup = new QGroupBox("Measurement mode");
+        auto *modeForm = new QFormLayout(modeGroup);
+        m_modeCombo = new QComboBox;
+        m_modeCombo->addItem("Acoustic — microphone in a room (dB SPL)",
+                             ModeAcoustic);
+        m_modeCombo->addItem("Program — stream or console bus (LUFS)",
+                             ModeProgram);
+        modeForm->addRow("Mode:", m_modeCombo);
+        auto *modeHint = new QLabel(
+            "Acoustic anchors every level to the Cal offset for true dB SPL.\n"
+            "Program meters a digital bus against full scale: no calibration,\n"
+            "K-weighted loudness and true peak instead of Leq and dose.\n"
+            "Capture the stream with a loopback device (BlackHole on macOS,\n"
+            "VB-Audio Virtual Cable on Windows) fed by OBS's monitor output.");
+        modeHint->setStyleSheet("color:#8a92a6; font-size:11px;");
+        modeForm->addRow(modeHint);
+        inLay->addWidget(modeGroup);
+
+        m_programGroup = new QGroupBox("Program mode");
+        auto *progForm = new QFormLayout(m_programGroup);
+        m_pairLCombo = new QComboBox;
+        m_pairRCombo = new QComboBox;
+        m_pairLCombo->setToolTip(
+            "Which capture channels carry the stereo programme. Loudness is\n"
+            "the BS.1770 sum of this pair; the RTA keeps using the Ch "
+            "selector.");
+        auto *pairRow = new QHBoxLayout;
+        pairRow->setSpacing(4);
+        pairRow->addWidget(new QLabel("L"));
+        pairRow->addWidget(m_pairLCombo);
+        pairRow->addSpacing(8);
+        pairRow->addWidget(new QLabel("R"));
+        pairRow->addWidget(m_pairRCombo);
+        pairRow->addStretch(1);
+        progForm->addRow("Stereo pair:", pairRow);
+        m_targetCombo = new QComboBox;
+        for (const LoudnessTarget &t : kLoudnessTargets)
+            m_targetCombo->addItem(t.name);
+        progForm->addRow("Delivery target:", m_targetCombo);
+        m_targetSpin = new QDoubleSpinBox;
+        m_targetSpin->setRange(-40.0, 0.0);
+        m_targetSpin->setDecimals(1);
+        m_targetSpin->setSingleStep(0.5);
+        m_targetSpin->setSuffix(" LUFS");
+        progForm->addRow("Target level:", m_targetSpin);
+        m_ceilSpin = new QDoubleSpinBox;
+        m_ceilSpin->setRange(-9.0, 0.0);
+        m_ceilSpin->setDecimals(1);
+        m_ceilSpin->setSingleStep(0.5);
+        m_ceilSpin->setSuffix(" dBTP");
+        m_ceilSpin->setToolTip(
+            "True-peak ceiling. Lossy encoders overshoot, so -1 dBTP is the\n"
+            "usual safe limit even when the sample peak looks clean.");
+        progForm->addRow("True peak ceiling:", m_ceilSpin);
+        inLay->addWidget(m_programGroup);
+        auto *inBtns = new QDialogButtonBox(QDialogButtonBox::Close);
+        QObject::connect(inBtns, &QDialogButtonBox::rejected, m_inputDlg,
+                         &QWidget::hide);
+        inLay->addWidget(inBtns);
 
         loadSettings();
 
@@ -825,12 +965,49 @@ public:
             m_analyzer.resetLeq();
             m_analyzer.resetPeaks();
             m_metricsEng.resetSession();
+            m_loudEng.resetSession();
+            m_loudMeter->resetSession();
             m_breakout->resetMaxima();
         });
+        QObject::connect(m_modeCombo, &QComboBox::currentIndexChanged, this,
+                         [this](int) {
+                             changeMode(m_modeCombo->currentData().toInt());
+                         });
+        QObject::connect(m_pairLCombo, &QComboBox::currentIndexChanged, this,
+                         [this](int) { applyStereoPair(); });
+        QObject::connect(m_pairRCombo, &QComboBox::currentIndexChanged, this,
+                         [this](int) { applyStereoPair(); });
+        QObject::connect(m_targetCombo, &QComboBox::currentIndexChanged, this,
+                         [this](int i) {
+                             if (i >= 0 && i != kCustomTargetIdx) {
+                                 // blockSignals: filling in a preset must not
+                                 // bounce the combo back to Custom.
+                                 m_targetSpin->blockSignals(true);
+                                 m_ceilSpin->blockSignals(true);
+                                 m_targetSpin->setValue(
+                                     kLoudnessTargets[i].lufs);
+                                 m_ceilSpin->setValue(
+                                     kLoudnessTargets[i].ceilDbtp);
+                                 m_targetSpin->blockSignals(false);
+                                 m_ceilSpin->blockSignals(false);
+                             }
+                             applyTarget();
+                         });
+        QObject::connect(m_targetSpin, &QDoubleSpinBox::valueChanged, this,
+                         [this](double) {
+                             m_targetCombo->setCurrentIndex(kCustomTargetIdx);
+                             applyTarget();
+                         });
+        QObject::connect(m_ceilSpin, &QDoubleSpinBox::valueChanged, this,
+                         [this](double) {
+                             m_targetCombo->setCurrentIndex(kCustomTargetIdx);
+                             applyTarget();
+                         });
 
         // Applied here rather than in loadSettings so the currentChanged
         // handler above runs and assembles the split layout if needed.
-        m_tabs->setCurrentIndex(m_savedTabIdx);
+        m_tabs->setCurrentIndex(
+            std::clamp(m_savedTabIdx, 0, m_tabs->count() - 1));
 
         // --api [port] command-line override (handy for headless testing)
         const QStringList args = QApplication::arguments();
@@ -883,6 +1060,13 @@ private:
         connect(quitAct, &QAction::triggered, this, &QWidget::close);
 
         QMenu *settingsMenu = menuBar()->addMenu("&Settings");
+        QAction *inputAct = settingsMenu->addAction("&Input && Mode…");
+        connect(inputAct, &QAction::triggered, this, [this] {
+            m_inputDlg->show();
+            m_inputDlg->raise();
+            m_inputDlg->activateWindow();
+        });
+        settingsMenu->addSeparator();
         QAction *calAct = settingsMenu->addAction("&Calibrate SPL…");
         connect(calAct, &QAction::triggered, this, [this] { showCalibration(); });
         QAction *micAct = settingsMenu->addAction("Load &Mic Correction…");
@@ -986,8 +1170,9 @@ private:
     }
 
     void showMetricsSettings() {
-        MetricsDialog dlg(this, m_mainMetrics, m_breakoutMetrics, m_leqShortS,
-                          m_leqLongS, m_targets, m_breakoutSizeIdx);
+        MetricsDialog dlg(this, m_mode, m_mainMetrics, m_breakoutMetrics,
+                          m_leqShortS, m_leqLongS, m_targets,
+                          m_breakoutSizeIdx);
         if (dlg.exec() != QDialog::Accepted)
             return;
         m_mainMetrics = dlg.mainIds();
@@ -1014,8 +1199,8 @@ private:
     }
 
     void showAlarmSettings() {
-        AlarmsDialog dlg(this, m_alarmEnabled, m_alarmMetric, m_alarmWarn,
-                         m_alarmAlert);
+        AlarmsDialog dlg(this, m_mode, m_alarmEnabled, m_alarmMetric,
+                         m_alarmWarn, m_alarmAlert);
         if (dlg.exec() != QDialog::Accepted)
             return;
         m_alarmEnabled = dlg.enableCheck->isChecked();
@@ -1059,9 +1244,14 @@ private:
                 QString("Could not open \"%1\" for writing.").arg(path));
             return;
         }
-        QStringList head{"time"};
+        // Freeze the column set now: switching mode mid-log must not shift
+        // the columns out from under rows already written.
+        m_logIds.clear();
         for (const MetricInfo &mi : kMetricInfos)
-            head << mi.id;
+            if (metricInMode(mi, m_mode))
+                m_logIds << mi.id;
+        QStringList head{"time"};
+        head << m_logIds;
         head << "alarm";
         m_logFile.write(head.join(',').toUtf8() + "\n");
         m_lastLogMs = 0;
@@ -1089,8 +1279,8 @@ private:
         m_lastLogMs = now;
         QStringList row{QDateTime::fromMSecsSinceEpoch(now).toString(
             Qt::ISODateWithMs)};
-        for (const MetricInfo &mi : kMetricInfos) {
-            const double v = metricValue(mi.id, mv);
+        for (const QString &id : m_logIds) {
+            const double v = metricValue(id, mv);
             row << (std::isfinite(v) ? QString::number(v, 'f', 2) : QString());
         }
         row << QString::number(alarmState);
@@ -1132,6 +1322,15 @@ private:
         if (id == "l90") return QString("L90");
         if (id == "doseN") return QString("DOSE NIOSH");
         if (id == "doseO") return QString("DOSE OSHA");
+        // Units ride in the caption: the value line is 28 pt, and " LUFS"
+        // after the number pushes the digits out of a glanceable size.
+        if (id == "lufsM") return QString("M (LUFS)");
+        if (id == "lufsS") return QString("S (LUFS)");
+        if (id == "lufsI") return QString("INTEGRATED (LUFS)");
+        if (id == "toTarget") return QString("Δ TARGET (LU)");
+        if (id == "dbtp") return QString("TRUE PEAK (dBTP)");
+        if (id == "dbtpMax") return QString("TP MAX (dBTP)");
+        if (id == "plr") return QString("PLR (LU)");
         return id;
     }
 
@@ -1149,6 +1348,13 @@ private:
         if (id == "l90") return v.l90;
         if (id == "doseN") return v.doseNiosh;
         if (id == "doseO") return v.doseOsha;
+        if (id == "lufsM") return v.loud.momentary;
+        if (id == "lufsS") return v.loud.shortTerm;
+        if (id == "lufsI") return v.loud.integrated;
+        if (id == "toTarget") return v.toTarget;
+        if (id == "dbtp") return v.loud.truePeak;
+        if (id == "dbtpMax") return v.loud.truePeakMax;
+        if (id == "plr") return v.loud.plr;
         return kNaN;
     }
 
@@ -1245,39 +1451,42 @@ private:
         m_rta->setFreqGridlines(m_rtaGridCheck->isChecked());
         m_spectro->setSpanSeconds(
             spectroSpanSeconds(m_spectroSpanCombo->currentIndex()));
-        m_savedTabIdx = std::clamp(st.value("viewTab", 0).toInt(), 0, 2);
         m_breakout->setAlwaysOnTop(st.value("breakoutOnTop", false).toBool());
         const QByteArray bgeo = st.value("breakoutGeo").toByteArray();
         if (!bgeo.isEmpty())
             m_breakout->restoreGeometry(bgeo);
-        m_mainMetrics =
-            st.value("metricsMain", QStringList{"laf", "las", "leq"})
-                .toStringList();
-        m_breakoutMetrics =
-            st.value("metricsBreakout", QStringList{"laf", "las", "leq", "spark"})
-                .toStringList();
         m_leqShortS = st.value("leqShortS", 60).toInt();
         m_leqLongS = st.value("leqLongS", 900).toInt();
         m_breakoutSizeIdx = std::clamp(st.value("breakoutSize", 1).toInt(), 0, 2);
-        m_alarmEnabled = st.value("alarmEnabled", false).toBool();
-        m_alarmMetric = st.value("alarmMetric", "las").toString();
-        m_alarmWarn = st.value("alarmWarn", 96.0).toDouble();
-        m_alarmAlert = st.value("alarmAlert", 102.0).toDouble();
-        // Target bands as "id:lo:hi". Default: C-A ratio 8–12 dB, the range
-        // that keeps low-end energy below the "it's too loud" zone.
-        m_targets.clear();
-        const QStringList tgts =
-            st.value("metricTargets", QStringList{"ca:8:12"}).toStringList();
-        for (const QString &t : tgts) {
-            const QStringList p = t.split(':');
-            if (p.size() != 3)
-                continue;
-            bool okL = false, okH = false;
-            const double lo = p[1].toDouble(&okL), hi = p[2].toDouble(&okH);
-            if (okL && okH && hi > lo)
-                m_targets.insert(p[0], {lo, hi});
-        }
-        applyMetricsConfig();
+
+        // Program-mode delivery target. Global rather than mode-scoped: it
+        // only means anything in Program mode anyway.
+        m_pairL = st.value("pairL", 0).toInt();
+        m_pairR = st.value("pairR", 1).toInt();
+        m_targetIdx = std::clamp(st.value("targetIdx", 0).toInt(), 0,
+                                 kCustomTargetIdx);
+        m_targetLufs = st.value("targetLufs",
+                                kLoudnessTargets[m_targetIdx].lufs).toDouble();
+        m_ceilDbtp = st.value("ceilDbtp",
+                              kLoudnessTargets[m_targetIdx].ceilDbtp).toDouble();
+        m_targetCombo->blockSignals(true);
+        m_targetCombo->setCurrentIndex(m_targetIdx);
+        m_targetCombo->blockSignals(false);
+        m_targetSpin->blockSignals(true);
+        m_targetSpin->setValue(m_targetLufs);
+        m_targetSpin->blockSignals(false);
+        m_ceilSpin->blockSignals(true);
+        m_ceilSpin->setValue(m_ceilDbtp);
+        m_ceilSpin->blockSignals(false);
+
+        m_mode = st.value("mode", ModeAcoustic).toInt() == ModeProgram
+                     ? ModeProgram
+                     : ModeAcoustic;
+        m_modeCombo->blockSignals(true);
+        m_modeCombo->setCurrentIndex(m_modeCombo->findData(m_mode));
+        m_modeCombo->blockSignals(false);
+        loadModeSettings();
+        applyMode();
         if (st.value("breakoutOpen", false).toBool())
             m_breakoutAct->setChecked(true);  // toggled handler shows it
         const QString micPath = st.value("micCorrFile").toString();
@@ -1288,7 +1497,74 @@ private:
             restoreGeometry(geo);
     }
 
+    // Settings keys that differ between modes. Acoustic keeps the original
+    // un-prefixed names so existing installs carry over untouched.
+    QString mkey(const char *k) const {
+        return m_mode == ModeProgram ? QString("program/") + k : QString(k);
+    }
+
+    void loadModeSettings() {
+        QSettings st("ProdMesh", "RemoteRTA");
+        const bool program = m_mode == ModeProgram;
+        m_mainMetrics =
+            st.value(mkey("metricsMain"),
+                     program ? QStringList{"lufsM", "lufsS", "lufsI", "dbtpMax"}
+                             : QStringList{"laf", "las", "leq"})
+                .toStringList();
+        m_breakoutMetrics =
+            st.value(mkey("metricsBreakout"),
+                     program
+                         ? QStringList{"lufsS", "lufsI", "dbtpMax", "spark"}
+                         : QStringList{"laf", "las", "leq", "spark"})
+                .toStringList();
+        m_alarmEnabled = st.value(mkey("alarmEnabled"), false).toBool();
+        m_alarmMetric =
+            st.value(mkey("alarmMetric"), program ? "lufsS" : "las").toString();
+        m_alarmWarn =
+            st.value(mkey("alarmWarn"), program ? -12.0 : 96.0).toDouble();
+        m_alarmAlert =
+            st.value(mkey("alarmAlert"), program ? -9.0 : 102.0).toDouble();
+        m_inputChannel = st.value(mkey("inputChannel"), 0).toInt();
+        m_savedTabIdx = st.value(mkey("viewTab"), 0).toInt();
+        // Target bands as "id:lo:hi". Acoustic defaults to C-A ratio 8–12 dB,
+        // the range that keeps low-end energy below the "it's too loud" zone.
+        m_targets.clear();
+        const QStringList tgts =
+            st.value(mkey("metricTargets"),
+                     program ? QStringList{} : QStringList{"ca:8:12"})
+                .toStringList();
+        for (const QString &t : tgts) {
+            const QStringList p = t.split(':');
+            if (p.size() != 3)
+                continue;
+            bool okL = false, okH = false;
+            const double lo = p[1].toDouble(&okL), hi = p[2].toDouble(&okH);
+            if (okL && okH && hi > lo)
+                m_targets.insert(p[0], {lo, hi});
+        }
+    }
+
+    void saveModeSettings(QSettings &st) {
+        st.setValue(mkey("metricsMain"), m_mainMetrics);
+        st.setValue(mkey("metricsBreakout"), m_breakoutMetrics);
+        st.setValue(mkey("alarmEnabled"), m_alarmEnabled);
+        st.setValue(mkey("alarmMetric"), m_alarmMetric);
+        st.setValue(mkey("alarmWarn"), m_alarmWarn);
+        st.setValue(mkey("alarmAlert"), m_alarmAlert);
+        st.setValue(mkey("inputChannel"), m_inputChannel);
+        st.setValue(mkey("viewTab"), m_tabs->currentIndex());
+        QStringList tgts;
+        for (auto it = m_targets.constBegin(); it != m_targets.constEnd(); ++it)
+            tgts << QString("%1:%2:%3")
+                        .arg(it.key())
+                        .arg(it->first)
+                        .arg(it->second);
+        st.setValue(mkey("metricTargets"), tgts);
+    }
+
     void saveSettings() {
+        if (m_applyingMode)  // tab churn mid-switch is not a user choice
+            return;
         QSettings st("ProdMesh", "RemoteRTA");
         st.setValue("cal", m_calSpin->value());
         st.setValue("weighting", m_weightCombo->currentText());
@@ -1308,30 +1584,92 @@ private:
         st.setValue("rtaSens", m_rtaSensSpin->value());
         st.setValue("rtaFreqGrid", m_rtaGridCheck->isChecked());
         st.setValue("spectroSpan", m_spectroSpanCombo->currentIndex());
-        st.setValue("viewTab", m_tabs->currentIndex());
         st.setValue("breakoutOpen", m_breakout->isVisible());
         st.setValue("breakoutOnTop", m_breakout->alwaysOnTop());
         st.setValue("breakoutGeo", m_breakout->saveGeometry());
-        st.setValue("metricsMain", m_mainMetrics);
-        st.setValue("metricsBreakout", m_breakoutMetrics);
         st.setValue("leqShortS", m_leqShortS);
         st.setValue("leqLongS", m_leqLongS);
         st.setValue("breakoutSize", m_breakoutSizeIdx);
-        st.setValue("alarmEnabled", m_alarmEnabled);
-        st.setValue("alarmMetric", m_alarmMetric);
-        st.setValue("alarmWarn", m_alarmWarn);
-        st.setValue("alarmAlert", m_alarmAlert);
-        QStringList tgts;
-        for (auto it = m_targets.constBegin(); it != m_targets.constEnd(); ++it)
-            tgts << QString("%1:%2:%3")
-                        .arg(it.key())
-                        .arg(it->first)
-                        .arg(it->second);
-        st.setValue("metricTargets", tgts);
+        st.setValue("mode", m_mode);
+        st.setValue("pairL", m_pairL);
+        st.setValue("pairR", m_pairR);
+        st.setValue("targetIdx", m_targetIdx);
+        st.setValue("targetLufs", m_targetLufs);
+        st.setValue("ceilDbtp", m_ceilDbtp);
         if (m_deviceCombo->currentIndex() >= 0)
             st.setValue("device", m_deviceCombo->currentText());
-        st.setValue("inputChannel", m_inputChannel);
         st.setValue("geometry", saveGeometry());
+        saveModeSettings(st);
+    }
+
+    void changeMode(int mode) {
+        if (mode == m_mode)
+            return;
+        {
+            QSettings st("ProdMesh", "RemoteRTA");
+            saveModeSettings(st);  // still keyed to the mode we are leaving
+        }
+        m_mode = mode;
+        loadModeSettings();
+        applyMode();
+        populateChannels();
+        saveSettings();
+        statusBar()->showMessage(
+            mode == ModeProgram
+                ? "Program mode — metering the bus against full scale (LUFS)"
+                : "Acoustic mode — metering the room in dB SPL",
+            6000);
+    }
+
+    void applyMode() {
+        const bool program = m_mode == ModeProgram;
+        m_applyingMode = true;
+        setWindowTitle(QString("%1 — %2").arg(
+            APP_NAME, program ? "Program (Loudness)" : "Acoustic (SPL)"));
+        // Nothing to calibrate against on a digital bus.
+        m_calLbl->setVisible(!program);
+        m_calSpin->setVisible(!program);
+        m_programGroup->setEnabled(program);
+
+        // Loudness leads the tab bar in Program mode; it is the view people
+        // open the app for there.
+        const int at = m_tabs->indexOf(m_loudPage);
+        if (program && at < 0) {
+            m_tabs->insertTab(0, m_loudPage, "Loudness");
+        } else if (!program && at >= 0) {
+            m_tabs->removeTab(at);
+            m_loudPage->hide();
+        }
+
+        m_engine.setLoudness(program, m_pairL, m_pairR);
+        m_loudEng.resetAll();
+        m_loudVals = LoudnessValues();
+        m_loudMeter->setTarget(m_targetLufs, m_ceilDbtp);
+        m_loudMeter->resetSession();
+        m_breakout->setSparkCaption(program ? "LOUDNESS — 10 MIN"
+                                            : "SPL — 10 MIN");
+        m_analyzer.resetAll();
+        m_metricsEng.resetAll();
+        applyMetricsConfig();
+        m_tabs->setCurrentIndex(
+            std::clamp(m_savedTabIdx, 0, m_tabs->count() - 1));
+        m_applyingMode = false;
+    }
+
+    void applyStereoPair() {
+        m_pairL = m_pairLCombo->currentData().toInt();
+        m_pairR = m_pairRCombo->currentData().toInt();
+        m_engine.setLoudness(m_mode == ModeProgram, m_pairL, m_pairR);
+        m_loudEng.resetAll();
+        saveSettings();
+    }
+
+    void applyTarget() {
+        m_targetIdx = m_targetCombo->currentIndex();
+        m_targetLufs = m_targetSpin->value();
+        m_ceilDbtp = m_ceilSpin->value();
+        m_loudMeter->setTarget(m_targetLufs, m_ceilDbtp);
+        saveSettings();
     }
 
     // Rebuild the channel picker for the device that just opened: 1..N plus
@@ -1352,6 +1690,28 @@ private:
         m_chanCombo->setEnabled(n > 1);
         m_chanCombo->blockSignals(false);
         m_engine.setChannel(m_inputChannel);
+
+        // Stereo pair pickers track the same channel list. A mono device
+        // collapses both to channel 1, which BS.1770 handles fine.
+        for (QComboBox *c : {m_pairLCombo, m_pairRCombo}) {
+            c->blockSignals(true);
+            c->clear();
+            for (int i = 1; i <= n; ++i)
+                c->addItem(QString::number(i), i - 1);
+        }
+        auto pick = [](QComboBox *c, int &want, int fallback) {
+            int i = c->findData(want);
+            if (i < 0) {
+                i = std::clamp(fallback, 0, c->count() - 1);
+                want = c->itemData(i).toInt();
+            }
+            c->setCurrentIndex(i);
+        };
+        pick(m_pairLCombo, m_pairL, 0);
+        pick(m_pairRCombo, m_pairR, 1);
+        m_pairLCombo->blockSignals(false);
+        m_pairRCombo->blockSignals(false);
+        m_engine.setLoudness(m_mode == ModeProgram, m_pairL, m_pairR);
     }
 
     void setClipStyle(bool lit) {
@@ -1494,14 +1854,30 @@ private:
         AnalyzerResult res = m_analyzer.process(m_samples, dt, rtaTau(),
                                                 m_peakCheck->isChecked());
         m_lastSlowDbfs = res.slow;
-        const double cal = m_calSpin->value();
+        // Program mode meters a digital bus: full scale is the reference, so
+        // there is no offset to add and every level reads dBFS.
+        const bool program = m_mode == ModeProgram;
+        const double cal = program ? 0.0 : m_calSpin->value();
         const QString w = m_weightCombo->currentText();
+
+        // Loudness runs off the capture side's gapless 100 ms sub-blocks,
+        // not off the overlapping FFT windows above.
+        if (program) {
+            m_engine.takeLoudness(m_loudBlocks);
+            for (const LoudnessBlock &b : m_loudBlocks)
+                m_loudEng.push(b);
+            m_loudVals = m_loudEng.values();
+            m_loudMeter->setValues(m_loudVals);
+        }
 
         m_metricsEng.push(res.powA, res.powC, pk, pkC, dt, cal);
         MetricValues mv = m_metricsEng.values(cal);
         mv.laf = res.fast + cal;
         mv.las = res.slow + cal;
         mv.leq = res.leq + cal;
+        mv.loud = m_loudVals;
+        if (program && std::isfinite(m_loudVals.integrated))
+            mv.toTarget = m_loudVals.integrated - m_targetLufs;
         for (auto &pr : m_readouts) {
             pr.second->set(metricCaption(pr.first), metricValue(pr.first, mv),
                            metricSuffix(pr.first));
@@ -1525,9 +1901,17 @@ private:
         m_breakout->updateMetrics(buildDisplays(m_breakoutMetrics, mv));
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        m_breakout->pushSpark(now, res.slow + cal);
-        m_history->setRange(cal - 80.0, cal);
-        m_history->push(now, res.fast + cal, res.slow + cal);
+        // The history strip carries whatever the mode's headline level is:
+        // Slow SPL in Acoustic, momentary/short-term loudness in Program.
+        if (program) {
+            m_breakout->pushSpark(now, m_loudVals.shortTerm);
+            m_history->setRange(m_targetLufs - 24.0, m_targetLufs + 9.0);
+            m_history->push(now, m_loudVals.momentary, m_loudVals.shortTerm);
+        } else {
+            m_breakout->pushSpark(now, res.slow + cal);
+            m_history->setRange(cal - 80.0, cal);
+            m_history->push(now, res.fast + cal, res.slow + cal);
+        }
 
         ApiServer::Snapshot snap;
         snap.timeMs = now;
@@ -1542,9 +1926,13 @@ private:
         snap.bands = res.bands;
         snap.peaks = res.peaks;
         snap.micCorr = m_micCorrName;
+        snap.mode = program ? "program" : "acoustic";
+        snap.targetLufs = program ? m_targetLufs : kNaN;
+        snap.ceilDbtp = program ? m_ceilDbtp : kNaN;
         snap.metrics.clear();
         for (const MetricInfo &mi : kMetricInfos)
-            snap.metrics.push_back({mi.id, metricValue(mi.id, mv)});
+            if (metricInMode(mi, m_mode))
+                snap.metrics.push_back({mi.id, metricValue(mi.id, mv)});
         const int alarmState = alarmStateFor(m_alarmMetric, mv);
         snap.alarmEnabled = m_alarmEnabled;
         snap.alarmMetric = m_alarmMetric;
@@ -1573,6 +1961,16 @@ private:
     AudioEngine m_engine;
     Analyzer m_analyzer;
     MetricsEngine m_metricsEng;
+    LoudnessEngine m_loudEng;
+    LoudnessValues m_loudVals;
+    std::vector<LoudnessBlock> m_loudBlocks;
+    int m_mode = ModeAcoustic;
+    bool m_applyingMode = false;
+    int m_pairL = 0, m_pairR = 1;      // capture channels carrying L / R
+    int m_targetIdx = 0;               // index into kLoudnessTargets
+    double m_targetLufs = -14.0;
+    double m_ceilDbtp = -1.0;
+    QStringList m_logIds;              // CSV columns, frozen at log start
     QStringList m_mainMetrics;
     QStringList m_breakoutMetrics;
     int m_leqShortS = 60;
@@ -1616,6 +2014,17 @@ private:
     QComboBox *m_spectroSpanCombo;
     QCheckBox *m_rtaGridCheck;
     QDialog *m_displayDlg;
+    QDialog *m_inputDlg;
+    QGroupBox *m_programGroup;
+    QComboBox *m_modeCombo;
+    QComboBox *m_pairLCombo;
+    QComboBox *m_pairRCombo;
+    QComboBox *m_targetCombo;
+    QDoubleSpinBox *m_targetSpin;
+    QDoubleSpinBox *m_ceilSpin;
+    QLabel *m_calLbl;
+    LoudnessMeter *m_loudMeter;
+    QWidget *m_loudPage;
     BreakoutWindow *m_breakout = nullptr;
     QAction *m_breakoutAct = nullptr;
     QCheckBox *m_peakCheck;
@@ -1679,6 +2088,97 @@ static bool metricsSelftest() {
                 v.doseNiosh, v.doseOsha);
     ok = ok && std::fabs(v.doseNiosh - 100.0) < 0.5 &&
          std::fabs(v.doseOsha - 50.0) < 0.5;
+    return ok;
+}
+
+// Program-mode DSP chain: K-weighting, true peak, and the two-stage loudness
+// gate. Expected values come from BS.1770-4 itself, not from a previous run.
+static bool loudnessSelftest() {
+    bool ok = true;
+
+    // The K-weight coefficients are derived per sample rate rather than
+    // hardcoded, so check the 48 kHz design against the published table.
+    KWeightFilter kw;
+    kw.design(48000.0);
+    const double ref[10] = {1.53512485958697,  -2.69169618940638,
+                            1.19839281085285,  -1.69065929318241,
+                            0.73248077421585,  1.0,
+                            -2.0,              1.0,
+                            -1.99004745483398, 0.99007225036621};
+    const double got[10] = {kw.shelf().b0,     kw.shelf().b1,
+                            kw.shelf().b2,     kw.shelf().a1,
+                            kw.shelf().a2,     kw.highpass().b0,
+                            kw.highpass().b1,  kw.highpass().b2,
+                            kw.highpass().a1,  kw.highpass().a2};
+    double worst = 0.0;
+    for (int i = 0; i < 10; ++i)
+        worst = std::max(worst, std::fabs(got[i] - ref[i]));
+    std::printf("K-weight @48k: worst coefficient error = %.1e "
+                "(expected < 1e-9)\n",
+                worst);
+    ok = ok && worst < 1e-9;
+
+    // BS.1770 anchor: a full-scale 1 kHz sine on one channel reads -3.01
+    // LUFS — the +0.69 dB K-weight gain at 1 kHz cancels the -0.691 offset.
+    kw.reset();
+    double sum = 0.0;
+    int n = 0;
+    for (int i = 0; i < 48000 * 2; ++i) {
+        const double y = kw.step(std::sin(2.0 * kPi * 1000.0 * i / 48000.0));
+        if (i >= 4800) {  // skip filter settling
+            sum += y * y;
+            ++n;
+        }
+    }
+    const double lufs = LoudnessEngine::loudness(sum / n);
+    std::printf("full-scale 1 kHz sine = %.2f LUFS (expected -3.01)\n", lufs);
+    ok = ok && std::fabs(lufs + 3.01) < 0.05;
+
+    // True peak: a sine at fs/4 shifted 45 deg peaks exactly between samples,
+    // so sample peak reads -3.01 dBFS while the real peak is full scale.
+    TruePeakDetector tpd;
+    double sp = 0.0, tpk = 0.0;
+    for (int i = 0; i < 4800; ++i) {
+        const double x = std::sin(kPi * i / 2.0 + kPi / 4.0);
+        sp = std::max(sp, std::fabs(x));
+        tpk = std::max(tpk, tpd.step(x));
+    }
+    std::printf("inter-sample peak: sample = %.2f dBFS (expected -3.01), "
+                "true = %.2f dBTP (expected ~0.00)\n",
+                20.0 * std::log10(sp), 20.0 * std::log10(tpk));
+    ok = ok && std::fabs(20.0 * std::log10(sp) + 3.01) < 0.05 &&
+         std::fabs(20.0 * std::log10(tpk)) < 0.3;
+
+    auto run = [](LoudnessEngine &e, double level, int seconds) {
+        LoudnessBlock b;
+        b.z = LoudnessEngine::powerFor(level);
+        for (int i = 0; i < seconds * (1000 / LoudnessEngine::kSubMs); ++i)
+            e.push(b);
+    };
+
+    // Absolute gate: silence after the programme must not drag it down.
+    LoudnessEngine g1;
+    run(g1, -14.0, 60);
+    for (int i = 0; i < 600; ++i)
+        g1.push(LoudnessBlock{});  // digital black
+    LoudnessValues lv = g1.values();
+    std::printf("gate: -14 LUFS then silence -> integrated %.2f LUFS "
+                "(expected -14.00)\n",
+                lv.integrated);
+    ok = ok && std::fabs(lv.integrated + 14.0) < 0.05;
+
+    // Relative gate: a -40 LUFS passage sits more than 10 LU below the mean,
+    // so it drops out instead of pulling the programme level down.
+    LoudnessEngine g2;
+    run(g2, -14.0, 60);
+    run(g2, -40.0, 60);
+    lv = g2.values();
+    std::printf("gate: -14 then -40 LUFS -> integrated %.2f LUFS "
+                "(expected -14.00), M = %.2f, S = %.2f (expected -40.00)\n",
+                lv.integrated, lv.momentary, lv.shortTerm);
+    ok = ok && std::fabs(lv.integrated + 14.0) < 0.1 &&
+         std::fabs(lv.momentary + 40.0) < 0.05 &&
+         std::fabs(lv.shortTerm + 40.0) < 0.05;
     return ok;
 }
 
@@ -1753,6 +2253,7 @@ static int selftest() {
     ok = ok && std::fabs(res.fast + 9.01) < 0.25;
 
     ok = metricsSelftest() && ok;
+    ok = loudnessSelftest() && ok;
 
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

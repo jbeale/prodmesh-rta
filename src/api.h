@@ -49,6 +49,11 @@ public:
         std::vector<double> bands;                    // dB SPL
         std::vector<double> peaks;                    // empty if peak hold off
         QString micCorr;                              // cal file name, or empty
+        // "acoustic" (dB SPL against the cal offset) or "program" (LUFS
+        // against digital full scale). Consumers should switch on this
+        // before interpreting the metric ids below.
+        QString mode = "acoustic";
+        double targetLufs = kNaN, ceilDbtp = kNaN;  // program mode only
         // Derived SPL metrics (id -> value); see the Metrics dialog for ids.
         std::vector<std::pair<QString, double>> metrics;
         // Traffic-light alarm on one watched metric.
@@ -145,6 +150,7 @@ private:
         QJsonObject o{
             {"type", "levels"},
             {"time_ms", m_snap.timeMs},
+            {"mode", m_snap.mode},
             {"weighting", m_snap.weighting},
             {"cal_db", m_snap.cal},
             {"fast_db", jnum(m_snap.fast)},
@@ -158,7 +164,18 @@ private:
         o.insert("metrics", metricsJson());
         o.insert("alarm", alarmJson());
         o.insert("targets", targetsJson());
+        if (m_snap.mode == "program")
+            o.insert("loudness", loudnessJson());
         return o;
+    }
+
+    // Program-mode delivery target, so a client can draw the same target
+    // zone the app does without hardcoding a platform.
+    QJsonObject loudnessJson() const {
+        return QJsonObject{
+            {"target_lufs", jnum(m_snap.targetLufs)},
+            {"ceiling_dbtp", jnum(m_snap.ceilDbtp)},
+        };
     }
 
     QJsonObject targetsJson() const {
@@ -353,6 +370,7 @@ private:
         if (path == "/api/status") {
             return QJsonDocument(QJsonObject{
                 {"app", "prodmesh-remote-rta"},
+                {"mode", m_snap.mode},
                 {"samplerate", m_snap.samplerate},
                 {"input_channels", m_snap.channels},
                 {"input_channel", m_snap.channel < 0
@@ -372,8 +390,9 @@ private:
             });
         }
         if (path == "/api/spl") {
-            return QJsonDocument(QJsonObject{
+            QJsonObject o{
                 {"time_ms", now},
+                {"mode", m_snap.mode},
                 {"weighting", m_snap.weighting},
                 {"cal_db", m_snap.cal},
                 {"fast_db", jnum(m_snap.fast)},
@@ -382,7 +401,10 @@ private:
                 {"metrics", metricsJson()},
                 {"alarm", alarmJson()},
                 {"targets", targetsJson()},
-            });
+            };
+            if (m_snap.mode == "program")
+                o.insert("loudness", loudnessJson());
+            return QJsonDocument(o);
         }
         if (path == "/api/rta") {
             QJsonObject o = levelsJson();

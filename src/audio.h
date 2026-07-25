@@ -1,4 +1,9 @@
 // Audio capture into a ring buffer via QAudioSource.
+//
+// All captured channels are kept interleaved in the ring; the collapse to a
+// single analysis channel happens at read time. That keeps one code path for
+// both app modes (Acoustic reads one channel, Program needs a stereo pair)
+// and lets the channel selection change without discarding history.
 #pragma once
 
 #include <QAudioDevice>
@@ -17,7 +22,7 @@
 
 class AudioEngine {
 public:
-    AudioEngine() : m_buf(FFT_SIZE * 4, 0.0f) {}
+    AudioEngine() { allocate(1); }
     ~AudioEngine() { stop(); }
 
     void start(const QAudioDevice &dev) {
@@ -33,12 +38,12 @@ public:
         m_format = fmt;
         {
             QMutexLocker lock(&m_mutex);
-            std::fill(m_buf.begin(), m_buf.end(), 0.0f);
-            m_pos = 0;
-            m_total = 0;
-            m_peak = 0.0f;
-            m_peakC = 0.0f;
+            allocate(std::max(1, fmt.channelCount()));
             m_cw.design(fmt.sampleRate());
+            for (auto &k : m_kw)
+                k.design(fmt.sampleRate());
+            m_subSamples = std::max(1, fmt.sampleRate() / 10);  // 100 ms
+            resetLoudnessAccum();
         }
         m_source = new QAudioSource(dev, fmt);
         m_io = m_source->start();
@@ -70,19 +75,38 @@ public:
         if (ch == m_channel)
             return;
         m_channel = ch;
-        // New signal source: clear ballistics so old audio doesn't linger.
-        std::fill(m_buf.begin(), m_buf.end(), 0.0f);
-        m_pos = 0;
-        m_total = 0;
+        // The ring holds every channel, so the history for the new selection
+        // is already correct — only the per-sample filter state and the
+        // peak-since-last-read are stale.
         m_peak = 0.0f;
         m_peakC = 0.0f;
         m_cw.reset();
     }
     int channel() const { return m_channel; }
 
-    // Fills `out` with the most recent n samples. Returns false while the
-    // ring buffer is still filling. `peakOut` / `peakCOut` are the raw and
-    // C-weighted sample peaks since the last call.
+    // Loudness path (Program mode): K-weighting + true peak over one or two
+    // channels, accumulated into 100 ms sub-blocks. Off by default so
+    // Acoustic mode pays nothing for it.
+    void setLoudness(bool on, int chL, int chR) {
+        QMutexLocker lock(&m_mutex);
+        m_loudOn = on;
+        m_reqL = chL;
+        m_reqR = chR;
+        applyLoudnessRequest();
+    }
+    bool loudnessEnabled() const { return !m_loudCh.empty(); }
+
+    // Hands over the sub-blocks completed since the last call.
+    void takeLoudness(std::vector<LoudnessBlock> &out) {
+        QMutexLocker lock(&m_mutex);
+        out.swap(m_loudQ);
+        m_loudQ.clear();
+    }
+
+    // Fills `out` with the most recent n samples of the selected channel (or
+    // the mix). Returns false while the ring buffer is still filling.
+    // `peakOut` / `peakCOut` are the raw and C-weighted sample peaks since
+    // the last call.
     bool latest(int n, std::vector<float> &out, float &peakOut,
                 float &peakCOut) {
         QMutexLocker lock(&m_mutex);
@@ -90,44 +114,97 @@ public:
         m_peak = 0.0f;
         peakCOut = m_peakC;
         m_peakC = 0.0f;
-        const qint64 filled = std::min<qint64>(m_total, qint64(m_buf.size()));
-        if (filled < n)
+        const int sel = (m_channel >= 0 && m_channel < m_ch) ? m_channel : -1;
+        return copyOut(sel, n, out);
+    }
+
+    // Same, for one explicit channel — used by the stereo views.
+    bool latest(int ch, int n, std::vector<float> &out) {
+        QMutexLocker lock(&m_mutex);
+        if (ch < 0 || ch >= m_ch)
+            return false;
+        return copyOut(ch, n, out);
+    }
+
+private:
+    void allocate(int channels) {
+        m_ch = channels;
+        m_frames = FFT_SIZE * 4;
+        m_buf.assign(size_t(m_frames) * m_ch, 0.0f);
+        m_kw.resize(m_ch);
+        m_tp.resize(m_ch);
+        m_sumSq.assign(m_ch, 0.0);
+        m_pos = 0;
+        m_total = 0;
+        m_peak = 0.0f;
+        m_peakC = 0.0f;
+        applyLoudnessRequest();
+    }
+
+    // Resolve the requested stereo pair against the channel count the device
+    // actually opened with. Caller holds m_mutex.
+    void applyLoudnessRequest() {
+        const int ch = std::max(1, m_ch);
+        std::vector<int> want;
+        if (m_loudOn) {
+            want.push_back(std::clamp(m_reqL, 0, ch - 1));
+            const int r = std::clamp(m_reqR, 0, ch - 1);
+            if (r != want.front())
+                want.push_back(r);
+        }
+        if (want == m_loudCh)
+            return;
+        m_loudCh = want;
+        for (auto &k : m_kw)
+            k.reset();
+        for (auto &t : m_tp)
+            t.reset();
+        resetLoudnessAccum();
+        m_loudQ.clear();
+    }
+
+    void resetLoudnessAccum() {
+        std::fill(m_sumSq.begin(), m_sumSq.end(), 0.0);
+        m_subN = 0;
+        m_subTp = 0.0;
+    }
+
+    // Caller holds m_mutex. sel < 0 means mix all channels.
+    bool copyOut(int sel, int n, std::vector<float> &out) {
+        if (std::min<qint64>(m_total, m_frames) < n)
             return false;
         out.resize(n);
-        const int size = int(m_buf.size());
-        int start = int((m_pos - n) % size);
+        int start = int((m_pos - n) % m_frames);
         if (start < 0)
-            start += size;
-        if (start < m_pos) {
-            std::copy(m_buf.begin() + start, m_buf.begin() + m_pos, out.begin());
-        } else {
-            const int tail = size - start;
-            std::copy(m_buf.begin() + start, m_buf.end(), out.begin());
-            std::copy(m_buf.begin(), m_buf.begin() + m_pos, out.begin() + tail);
+            start += m_frames;
+        for (int i = 0; i < n; ++i) {
+            const int f = start + i < m_frames ? start + i : start + i - m_frames;
+            const float *fr = &m_buf[size_t(f) * m_ch];
+            if (sel >= 0) {
+                out[i] = fr[sel];
+            } else {
+                float acc = 0.0f;
+                for (int c = 0; c < m_ch; ++c)
+                    acc += fr[c];
+                out[i] = acc / float(m_ch);
+            }
         }
         return true;
     }
 
-private:
     void onReady() {
         if (!m_io)
             return;
         const QByteArray data = m_io->readAll();
         const int ch = m_format.channelCount();
         const int bps = m_format.bytesPerSample();
-        if (ch <= 0 || bps <= 0)
+        if (ch <= 0 || bps <= 0 || ch != m_ch)
             return;
         const int frames = int(data.size()) / (ch * bps);
         if (frames <= 0)
             return;
-        int sel;
-        {
-            QMutexLocker lock(&m_mutex);
-            sel = (m_channel >= 0 && m_channel < ch) ? m_channel : -1;
-        }
-        m_conv.resize(frames);
         const char *p = data.constData();
-        auto sample = [&](int i, int c) -> double {
+        auto sample = [&](int i, int c) -> float {
             const char *sp = p + (size_t(i) * ch + c) * bps;
             switch (m_format.sampleFormat()) {
             case QAudioFormat::Float: {
@@ -138,43 +215,64 @@ private:
             case QAudioFormat::Int16: {
                 qint16 s;
                 std::memcpy(&s, sp, 2);
-                return s / 32768.0;
+                return float(s / 32768.0);
             }
             case QAudioFormat::Int32: {
                 qint32 s;
                 std::memcpy(&s, sp, 4);
-                return s / 2147483648.0;
+                return float(s / 2147483648.0);
             }
             case QAudioFormat::UInt8: {
                 quint8 s;
                 std::memcpy(&s, sp, 1);
-                return (int(s) - 128) / 128.0;
+                return float((int(s) - 128) / 128.0);
             }
             default:
-                return 0.0;
+                return 0.0f;
             }
         };
-        for (int i = 0; i < frames; ++i) {
-            if (sel >= 0) {
-                m_conv[i] = float(sample(i, sel));
-            } else {
-                double acc = 0.0;
-                for (int c = 0; c < ch; ++c)
-                    acc += sample(i, c);
-                m_conv[i] = float(acc / ch);
-            }
-        }
+
         QMutexLocker lock(&m_mutex);
-        const int size = int(m_buf.size());
+        const int sel = (m_channel >= 0 && m_channel < ch) ? m_channel : -1;
         for (int i = 0; i < frames; ++i) {
-            m_buf[m_pos] = m_conv[i];
-            m_pos = (m_pos + 1) % size;
-            const float mag = std::fabs(m_conv[i]);
+            float *fr = &m_buf[size_t(m_pos) * m_ch];
+            for (int c = 0; c < ch; ++c)
+                fr[c] = sample(i, c);
+            m_pos = m_pos + 1 < m_frames ? m_pos + 1 : 0;
+
+            // Analysis-channel ballistics (unchanged meaning: the CLIP light
+            // and LZpk/LCpk follow whatever channel the RTA is showing).
+            float v;
+            if (sel >= 0) {
+                v = fr[sel];
+            } else {
+                float acc = 0.0f;
+                for (int c = 0; c < ch; ++c)
+                    acc += fr[c];
+                v = acc / float(ch);
+            }
+            const float mag = std::fabs(v);
             if (mag > m_peak)
                 m_peak = mag;
-            const float magC = float(std::fabs(m_cw.step(m_conv[i])));
+            const float magC = float(std::fabs(m_cw.step(v)));
             if (magC > m_peakC)
                 m_peakC = magC;
+
+            if (!m_loudCh.empty()) {
+                for (int c : m_loudCh) {
+                    const double k = m_kw[c].step(fr[c]);
+                    m_sumSq[c] += k * k;
+                    m_subTp = std::max(m_subTp, m_tp[c].step(fr[c]));
+                }
+                if (++m_subN >= m_subSamples) {
+                    LoudnessBlock b;
+                    for (int c : m_loudCh)
+                        b.z += m_sumSq[c] / m_subN;
+                    b.tpLin = m_subTp;
+                    m_loudQ.push_back(b);
+                    resetLoudnessAccum();
+                }
+            }
         }
         m_total += frames;
     }
@@ -183,12 +281,27 @@ private:
     QIODevice *m_io = nullptr;
     QAudioFormat m_format;
     QMutex m_mutex;
-    std::vector<float> m_buf;
-    std::vector<float> m_conv;
-    int m_pos = 0;
+    std::vector<float> m_buf;  // interleaved, m_frames x m_ch
+    int m_ch = 1;
+    int m_frames = 0;
+    int m_pos = 0;  // next frame to write
     qint64 m_total = 0;
     float m_peak = 0.0f;
     float m_peakC = 0.0f;
     int m_channel = 0;  // 0-based capture channel; -1 = mix of all
     CWeightFilter m_cw;
+
+    // Loudness path. The request is kept separately from the resolved
+    // channel list so reopening a device with a different channel count
+    // re-clamps it instead of silently switching loudness off.
+    bool m_loudOn = false;
+    int m_reqL = 0, m_reqR = 1;
+    std::vector<int> m_loudCh;  // empty = disabled
+    std::vector<KWeightFilter> m_kw;
+    std::vector<TruePeakDetector> m_tp;
+    std::vector<double> m_sumSq;
+    std::vector<LoudnessBlock> m_loudQ;
+    int m_subSamples = 4800;
+    int m_subN = 0;
+    double m_subTp = 0.0;
 };

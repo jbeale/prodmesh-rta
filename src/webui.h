@@ -26,6 +26,7 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
   #status { font-size: 12px; color: var(--dim); }
   #status.live::before { content: "● "; color: var(--bar); }
   #status.down::before { content: "● "; color: var(--alert); }
+  #modeinfo { font-size: 12px; color: var(--dim); margin-left: auto; }
   #alarmbanner {
     display: none; margin-bottom: 12px; padding: 8px 14px; border-radius: 6px;
     font-weight: 700; font-size: 15px; letter-spacing: 0.5px;
@@ -67,6 +68,7 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
 <header>
   <h1>ProdMesh Remote RTA</h1>
   <span id="status" class="down">connecting…</span>
+  <span id="modeinfo"></span>
 </header>
 <div id="alarmbanner"></div>
 <div class="bigrow" id="bigrow"></div>
@@ -78,18 +80,38 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
 <footer>Served by ProdMesh Remote RTA — levels update live over WebSocket.</footer>
 <script>
 "use strict";
-const BIG = ["laf", "las", "leq"];
-const SMALL = ["leqS", "leqL", "lzpk", "lcpk", "ca", "l10", "l50", "l90",
-               "doseN", "doseO"];
-function caption(id, w, m) {
+// Tile sets per measurement mode. The app reports which one it is in, so the
+// dashboard follows without needing to be told separately.
+const TILES = {
+  acoustic: {
+    big: ["laf", "las", "leq"],
+    small: ["leqS", "leqL", "lzpk", "lcpk", "ca", "l10", "l50", "l90",
+            "doseN", "doseO"],
+  },
+  program: {
+    big: ["lufsM", "lufsS", "lufsI"],
+    small: ["toTarget", "dbtp", "dbtpMax", "plr", "laf", "las", "leq", "lzpk"],
+  },
+};
+let MODE = "acoustic";
+let IDS = [];
+function caption(id, w, mode) {
+  const dbfs = mode === "program";
   const map = {
-    laf: "L" + w + "F (FAST)", las: "L" + w + "S (SLOW)", leq: "L" + w + "eq",
-    leqS: "LAeq SHORT", leqL: "LAeq LONG", lzpk: "LZpk", lcpk: "LCpk",
+    laf: "L" + w + "F (FAST)" + (dbfs ? " dBFS" : ""),
+    las: "L" + w + "S (SLOW)" + (dbfs ? " dBFS" : ""),
+    leq: "L" + w + "eq" + (dbfs ? " dBFS" : ""),
+    leqS: "LAeq SHORT", leqL: "LAeq LONG",
+    lzpk: "LZpk" + (dbfs ? " dBFS" : ""), lcpk: "LCpk",
     ca: "C-A RATIO", l10: "L10", l50: "L50", l90: "L90",
     doseN: "DOSE NIOSH", doseO: "DOSE OSHA",
+    lufsM: "M — 400 ms (LUFS)", lufsS: "S — 3 s (LUFS)",
+    lufsI: "INTEGRATED (LUFS)", toTarget: "Δ TARGET (LU)",
+    dbtp: "TRUE PEAK (dBTP)", dbtpMax: "TP MAX (dBTP)", plr: "PLR (LU)",
   };
   return map[id] || id;
 }
+function unit(mode) { return mode === "program" ? " LUFS" : " dB"; }
 function fmt(v, id) {
   if (v === null || v === undefined || !isFinite(v)) return "--.-";
   return v.toFixed(1) + (id === "doseN" || id === "doseO" ? "%" : "");
@@ -97,24 +119,31 @@ function fmt(v, id) {
 const GAUGE =
   `<div class="gauge" id="g-ID"><div class="track"></div>` +
   `<div class="band" id="gb-ID"></div><div class="dot" id="gd-ID"></div></div>`;
-function makeTiles() {
-  for (const id of BIG)
-    document.getElementById("bigrow").insertAdjacentHTML("beforeend",
+function makeTiles(mode) {
+  const set = TILES[mode] || TILES.acoustic;
+  MODE = mode;
+  IDS = set.big.concat(set.small);
+  const big = document.getElementById("bigrow");
+  const small = document.getElementById("gridrow");
+  big.innerHTML = "";
+  small.innerHTML = "";
+  for (const id of set.big)
+    big.insertAdjacentHTML("beforeend",
       `<div class="tile"><div class="cap" id="cap-${id}"></div>` +
       `<div class="val" id="val-${id}">--.-</div>` +
       GAUGE.replaceAll("ID", id) + `</div>`);
-  for (const id of SMALL)
-    document.getElementById("gridrow").insertAdjacentHTML("beforeend",
+  for (const id of set.small)
+    small.insertAdjacentHTML("beforeend",
       `<div class="tile"><div class="cap" id="cap-${id}"></div>` +
       `<div class="val small" id="val-${id}">--.-</div>` +
       GAUGE.replaceAll("ID", id) + `</div>`);
 }
-makeTiles();
+makeTiles("acoustic");
 
 // Peloton-style target gauges: band = target range, dot = current value
 // (green in band, amber outside; track spans one band-width either side).
 function setGauges(m, targets) {
-  for (const id of BIG.concat(SMALL)) {
+  for (const id of IDS) {
     const g = document.getElementById("g-" + id);
     const t = targets ? targets[id] : null;
     if (!t) { g.style.display = "none"; continue; }
@@ -140,8 +169,9 @@ function setGauges(m, targets) {
 function setAlarmUi(alarm) {
   const banner = document.getElementById("alarmbanner");
   banner.className = "";
-  for (const id of BIG.concat(SMALL)) {
+  for (const id of IDS) {
     const el = document.getElementById("val-" + id);
+    if (!el) continue;
     el.classList.remove("warn", "alert");
     if (alarm && alarm.enabled && alarm.metric === id && alarm.state > 0)
       el.classList.add(alarm.state >= 2 ? "alert" : "warn");
@@ -149,8 +179,9 @@ function setAlarmUi(alarm) {
   if (alarm && alarm.enabled && alarm.state > 0) {
     banner.className = alarm.state >= 2 ? "alert" : "warn";
     banner.textContent = (alarm.state >= 2 ? "ALERT — " : "WARNING — ") +
-      caption(alarm.metric, "A") + " over " +
-      (alarm.state >= 2 ? alarm.alert_db : alarm.warn_db).toFixed(1) + " dB";
+      caption(alarm.metric, "A", MODE) + " over " +
+      (alarm.state >= 2 ? alarm.alert_db : alarm.warn_db).toFixed(1) +
+      unit(MODE);
   }
 }
 
@@ -215,16 +246,25 @@ function connect() {
   ws.onmessage = ev => {
     const d = JSON.parse(ev.data);
     if (d.type !== "levels") return;
+    const mode = d.mode || "acoustic";
+    if (mode !== MODE) makeTiles(mode);
     const w = d.weighting || "A", m = d.metrics || {};
-    for (const id of BIG.concat(SMALL)) {
-      document.getElementById("cap-" + id).textContent = caption(id, w, m);
+    for (const id of IDS) {
+      document.getElementById("cap-" + id).textContent = caption(id, w, mode);
       document.getElementById("val-" + id).textContent = fmt(m[id], id);
     }
     setAlarmUi(d.alarm);
     setGauges(m, d.targets);
     drawRta(d);
     document.getElementById("rtacap").textContent =
-      "RTA — 1/3 OCTAVE (" + w + "-WEIGHTED, dB SPL)";
+      "RTA — 1/3 OCTAVE (" + w + "-WEIGHTED, " +
+      (mode === "program" ? "dBFS" : "dB SPL") + ")";
+    const L = d.loudness;
+    document.getElementById("modeinfo").textContent =
+      mode === "program" && L
+        ? "program · target " + L.target_lufs.toFixed(1) + " LUFS · ceiling " +
+          L.ceiling_dbtp.toFixed(1) + " dBTP"
+        : mode === "program" ? "program" : "acoustic · dB SPL";
   };
 }
 connect();

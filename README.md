@@ -18,6 +18,14 @@ input and get
 
 The C++ version additionally has:
 
+- **Two measurement modes** (**Settings → Input & Mode…**) — *Acoustic* meters
+  a room through a microphone in dB SPL; *Program* meters a stream or console
+  bus against digital full scale, with **EBU R128 / ITU-R BS.1770 loudness**
+  instead of the exposure metrics: momentary, short-term and gated integrated
+  **LUFS**, 4× oversampled **true peak** (dBTP), PLR, and delivery-target
+  presets for YouTube/Spotify/Twitch, Apple Podcasts, EBU R128 and ATSC A/85
+- **Loudness meter** — big gated Integrated readout, M/S bars on a
+  target-centred scale, shaded target zone, and true-peak over-counting
 - **Spectrogram** — scrolling log-frequency heat map (tab next to RTA)
   with selectable color themes, range, sensitivity, and time span
   (10 s – 10 min), plus a hover frequency cursor
@@ -37,7 +45,7 @@ The C++ version additionally has:
   turn yellow/red everywhere, including the web dashboard
   (**Settings → Alarms…**)
 - **SPL logging** — 1 Hz CSV of every metric for compliance records
-  (**File → Start SPL Log…**)
+  (**File → Start SPL Log…**); columns follow the active mode
 - **Web dashboard** — a live browser page (readouts, metric grid, RTA bars)
   served at the API root, viewable from any device on the LAN
 - **Persistent settings** — cal, weighting, device, averaging, API config,
@@ -179,6 +187,44 @@ output only appears when redirected:
 - **Reset Leq/Peaks** — restarts the Leq average and clears peak hold.
 - **CLIP** lights red when the input is within ~0.1 dB of full scale.
 
+### Program mode — metering a stream (C++ version)
+
+**Settings → Input & Mode…** switches between *Acoustic* (a mic in a room,
+dB SPL) and *Program* (a digital bus, LUFS). Program mode hides the Cal
+offset — full scale is the reference, so there is nothing to calibrate — and
+swaps the exposure metrics for EBU R128 loudness:
+
+| Id | Meaning |
+|---|---|
+| `lufsM` | Momentary loudness, 400 ms sliding window |
+| `lufsS` | Short-term loudness, 3 s sliding window |
+| `lufsI` | Integrated loudness, gated (−70 LUFS absolute, then −10 LU relative) |
+| `toTarget` | Integrated minus the delivery target, in LU |
+| `dbtp` | True peak over the last 400 ms, 4× oversampled |
+| `dbtpMax` | True-peak maximum since the last Reset |
+| `plr` | Peak-to-loudness ratio (`dbtpMax` − `lufsI`) |
+
+Integrated loudness and the true-peak maximum are **session** metrics, so hit
+**Reset Leq/Peaks** when the stream starts. Loudness is the BS.1770 sum of the
+stereo pair chosen in the dialog; the RTA keeps following the **Ch** selector.
+
+Getting the stream audio in needs a loopback device, because Qt only captures
+from *inputs*:
+
+- **macOS** — install [BlackHole](https://existential.audio/blackhole/) (2ch),
+  set it as OBS's Monitoring Device, and set the sources you want measured to
+  "Monitor and Output".
+- **Windows** — Qt enumerates capture endpoints, not WASAPI loopback, so route
+  OBS's monitor output to VB-Audio Virtual Cable (or use Stereo Mix if your
+  interface exposes it).
+
+Tapping OBS's monitor path is the right place to measure: post-fader,
+post-filter, and it matches what gets encoded. Pick a target from the presets
+(YouTube/Spotify/Twitch −14 LUFS, Apple Podcasts −16, EBU R128 −23, ATSC A/85
+−24) and keep true peak under the ceiling — lossy encoders reconstruct
+inter-sample peaks that plain sample-peak metering never sees, which is why
+−1 dBTP is the usual safe limit.
+
 ### Calibration
 
 Mics are not calibrated out of the box, so absolute dB SPL is only as good as
@@ -254,9 +300,18 @@ networks never see HTTP traffic. All endpoints are read-only GETs returning JSON
 | `/api/history?since_ms=&limit=` | 1 Hz SPL samples, up to 6 hours |
 | `ws://…/api/stream` | WebSocket: pushes SPL + bands at the configured rate |
 
-`metrics` maps metric ids (`laf las leq leqS leqL lzpk lcpk ca l10 l50 l90
-doseN doseO`) to values; `alarm` reports the watched metric, thresholds, and
-traffic-light `state` (0 ok / 1 warning / 2 alert).
+`metrics` maps metric ids to values; `alarm` reports the watched metric,
+thresholds, and traffic-light `state` (0 ok / 1 warning / 2 alert).
+
+Every payload carries a **`mode`** field — `"acoustic"` or `"program"` —
+and *which metric ids are present depends on it*, so switch on `mode` before
+reading them:
+
+- `acoustic`: `laf las leq leqS leqL lzpk lcpk ca l10 l50 l90 doseN doseO`
+  (dB SPL, cal offset applied)
+- `program`: `laf las leq lzpk` (now dBFS) plus `lufsM lufsS lufsI toTarget
+  dbtp dbtpMax plr`, and a `loudness` object with `target_lufs` and
+  `ceiling_dbtp` so a client can draw the same target zone the app does
 
 ### Live streaming
 
