@@ -1071,6 +1071,178 @@ private:
 
 // ---------------------------------------------------------------------------
 
+// Goniometer + phase correlation (Program mode).
+//
+// The goniometer plots the pair rotated 45 degrees — mid vertical, side
+// horizontal — so the shapes read directly: a vertical line is mono, a
+// horizontal line is polarity-inverted, a lean means one channel dominates,
+// and a round cloud is wide stereo. Drawn with phosphor-style persistence,
+// because the shape only emerges over time.
+//
+// The correlation bar underneath is the same information as a number, and is
+// the one to watch: sustained negative means a flipped channel, which is
+// inaudible in the room and cancels for every mono listener.
+class StereoScope : public QWidget {
+public:
+    StereoScope() : m_dots(kImg, kImg, QImage::Format_RGB32) {
+        setMinimumHeight(220);
+        clear();
+    }
+
+    void clear() {
+        m_dots.fill(theme::bg);
+        m_corr = kNaN;
+        m_negS = 0.0;
+        m_mono = false;
+        update();
+    }
+
+    // Mono sources have no stereo field to show; say so rather than drawing a
+    // vertical line that looks like a perfectly mono *mix*.
+    void setMonoSource(bool mono) {
+        if (mono == m_mono)
+            return;
+        m_mono = mono;
+        if (mono)
+            m_dots.fill(theme::bg);
+        update();
+    }
+
+    void setData(const std::vector<float> &l, const std::vector<float> &r,
+                 double dt) {
+        const int n = int(std::min(l.size(), r.size()));
+        if (n <= 0 || m_mono)
+            return;
+        const double c = stereoCorrelation(l.data(), r.data(), n);
+        // Smooth for readability; the underlying value is already averaged
+        // over the window, this just stops it twitching.
+        if (std::isfinite(c))
+            m_corr = std::isfinite(m_corr) ? 0.8 * m_corr + 0.2 * c : c;
+        m_negS = std::isfinite(m_corr) && m_corr < 0.0 ? m_negS + dt : 0.0;
+
+        QPainter p(&m_dots);
+        // Fade toward the background instead of clearing: the trail is what
+        // makes the shape legible.
+        p.fillRect(m_dots.rect(), QColor(theme::bg.red(), theme::bg.green(),
+                                         theme::bg.blue(), 46));
+        const double half = kImg / 2.0;
+        const double scale = half / 1.5;  // full-scale mono reaches ~2/3 out
+        p.setPen(QPen(theme::barTop, 1));
+        const int stride = std::max(1, n / 2200);
+        for (int i = 0; i < n; i += stride) {
+            const double mid = (double(l[i]) + double(r[i])) * kInvSqrt2;
+            const double side = (double(l[i]) - double(r[i])) * kInvSqrt2;
+            p.drawPoint(QPointF(half + side * scale, half - mid * scale));
+        }
+        update();
+    }
+
+    double correlation() const { return m_corr; }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter qp(this);
+        qp.fillRect(rect(), theme::bg);
+        QFont f = font();
+        f.setPointSize(9);
+        qp.setFont(f);
+        const int capH = QFontMetrics(f).height();
+        const int barH = 16;
+        const int foot = barH + capH * 2 + 14;
+        const int side = std::max(60, std::min(width() - 24, height() - foot));
+        const int gx = (width() - side) / 2;
+        const int gy = 8;
+
+        // --- goniometer ---
+        qp.setRenderHint(QPainter::Antialiasing, false);
+        qp.drawImage(QRect(gx, gy, side, side), m_dots);
+        qp.setRenderHint(QPainter::Antialiasing, true);
+        const double cx = gx + side / 2.0, cy = gy + side / 2.0;
+        qp.setPen(QPen(theme::grid, 1, Qt::DotLine));
+        qp.drawLine(QPointF(cx, gy), QPointF(cx, gy + side));
+        qp.drawLine(QPointF(gx, cy), QPointF(gx + side, cy));
+        qp.setPen(QPen(theme::grid, 1));
+        qp.setBrush(Qt::NoBrush);
+        qp.drawRect(gx, gy, side, side);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(gx, gy + 3, side, capH), Qt::AlignHCenter, "M");
+        qp.drawText(QRect(gx + 4, int(cy) - capH / 2, 40, capH), Qt::AlignLeft,
+                    "L");
+        qp.drawText(QRect(gx + side - 44, int(cy) - capH / 2, 40, capH),
+                    Qt::AlignRight, "R");
+        if (m_mono) {
+            qp.setPen(theme::text);
+            qp.drawText(QRect(gx, gy, side, side), Qt::AlignCenter,
+                        "mono source — no stereo field");
+        }
+
+        // --- correlation bar: -1 .. +1 ---
+        const int bx = gx, bw = side;
+        const int by = gy + side + 8;
+        qp.fillRect(QRect(bx, by, bw, barH), QColor("#1b1f28"));
+        auto xOf = [&](double v) {
+            return bx + bw * (std::clamp(v, -1.0, 1.0) + 1.0) / 2.0;
+        };
+        // Anything left of centre is the danger zone; tint it so the meter
+        // reads correctly even before you know what the number means.
+        qp.fillRect(QRectF(bx, by, bw / 2.0, barH), QColor(0xe0, 0x5c, 0x5c, 28));
+        if (std::isfinite(m_corr)) {
+            const double x = xOf(m_corr), mid = xOf(0.0);
+            qp.fillRect(QRectF(std::min(x, mid), by, std::fabs(x - mid), barH),
+                        QColor(corrColor(m_corr)));
+            qp.setPen(QPen(QColor(corrColor(m_corr)), 2));
+            qp.drawLine(QPointF(x, by), QPointF(x, by + barH));
+        }
+        qp.setPen(QPen(theme::grid, 1));
+        qp.drawLine(QPointF(xOf(0.0), by), QPointF(xOf(0.0), by + barH));
+        qp.setBrush(Qt::NoBrush);
+        qp.drawRect(bx, by, bw, barH);
+
+        qp.setPen(theme::text);
+        const int ly = by + barH + 2;
+        qp.drawText(QRect(bx, ly, bw, capH), Qt::AlignLeft, "-1 out of phase");
+        qp.drawText(QRect(bx, ly, bw, capH), Qt::AlignHCenter, "0");
+        qp.drawText(QRect(bx, ly, bw, capH), Qt::AlignRight, "mono +1");
+
+        // Verdict line — the part someone can act on.
+        QFont vf = f;
+        vf.setBold(true);
+        qp.setFont(vf);
+        qp.setPen(QColor(std::isfinite(m_corr) ? corrColor(m_corr) : "#8a92a6"));
+        qp.drawText(QRect(bx, ly + capH + 2, bw, capH), Qt::AlignHCenter,
+                    verdict());
+    }
+
+private:
+    static constexpr int kImg = 360;
+    static constexpr double kInvSqrt2 = 0.70710678118654752;
+
+    static const char *corrColor(double c) {
+        return c < 0.0 ? "#e05c5c" : c < 0.3 ? "#e8c84b" : "#2fbf9b";
+    }
+
+    QString verdict() const {
+        if (m_mono)
+            return QString();
+        if (!std::isfinite(m_corr))
+            return "no signal";
+        if (m_negS > 2.0)
+            return QString("CORRELATION %1 — check channel polarity")
+                .arg(m_corr, 0, 'f', 2);
+        if (m_corr < 0.3)
+            return QString("correlation %1 — thin when summed to mono")
+                .arg(m_corr, 0, 'f', 2);
+        return QString("correlation %1").arg(m_corr, 0, 'f', 2);
+    }
+
+    QImage m_dots;
+    double m_corr = kNaN;
+    double m_negS = 0.0;  // seconds of sustained negative correlation
+    bool m_mono = false;
+};
+
+// ---------------------------------------------------------------------------
+
 // Traffic-light alarm states shared by the readout widgets: 0 = normal,
 // 1 = warning (yellow), 2 = alert (red).
 inline const char *alarmColor(int state) {

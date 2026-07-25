@@ -143,6 +143,8 @@ static const MetricInfo kMetricInfos[] = {
     {"dbtp", "True peak (400 ms)", kProgramOnly},
     {"dbtpMax", "True peak — session max", kProgramOnly},
     {"plr", "Peak to loudness ratio", kProgramOnly},
+    {"corr", "Stereo correlation", kProgramOnly},
+    {"balance", "L/R balance", kProgramOnly},
 };
 
 static bool metricInMode(const MetricInfo &mi, int mode) {
@@ -780,6 +782,12 @@ public:
         loudSplit->setStretchFactor(0, 2);
         loudSplit->setStretchFactor(1, 3);
         loudLay->addWidget(loudSplit, 1);
+        m_stereo = new StereoScope;
+        m_stereoPage = new QWidget(this);
+        m_stereoPage->hide();
+        auto *stLay = new QVBoxLayout(m_stereoPage);
+        stLay->setContentsMargins(0, 4, 0, 0);
+        stLay->addWidget(m_stereo, 1);
         m_tabs = new QTabWidget;
         m_tabs->addTab(rtaPage, "RTA");
         m_tabs->addTab(spectroPage, "Spectrogram");
@@ -1410,6 +1418,8 @@ private:
         if (id == "dbtp") return QString("TRUE PEAK (dBTP)");
         if (id == "dbtpMax") return QString("TP MAX (dBTP)");
         if (id == "plr") return QString("PLR (LU)");
+        if (id == "corr") return QString("CORRELATION");
+        if (id == "balance") return QString("BALANCE (dB)");
         return id;
     }
 
@@ -1434,6 +1444,8 @@ private:
         if (id == "dbtp") return v.loud.truePeak;
         if (id == "dbtpMax") return v.loud.truePeakMax;
         if (id == "plr") return v.loud.plr;
+        if (id == "corr") return v.correlation;
+        if (id == "balance") return v.balance;
         return kNaN;
     }
 
@@ -1742,6 +1754,15 @@ private:
             m_loudPage->setParent(this);
             m_loudPage->hide();
         }
+        const int st = m_tabs->indexOf(m_stereoPage);
+        if (program && st < 0) {
+            m_tabs->addTab(m_stereoPage, "Stereo");
+        } else if (!program && st >= 0) {
+            m_tabs->removeTab(st);
+            m_stereoPage->setParent(this);
+            m_stereoPage->hide();
+        }
+        m_stereo->clear();
 
         m_engine.setLoudness(program, m_pairL, m_pairR);
         m_loudEng.resetAll();
@@ -2035,6 +2056,27 @@ private:
         mv.loud = m_loudVals;
         if (program && std::isfinite(m_loudVals.integrated))
             mv.toTarget = m_loudVals.integrated - m_targetLufs;
+
+        // Stereo field. Read as two explicit channels so L and R stay sample
+        // aligned; the interleaved ring gives that for free.
+        if (program) {
+            const bool stereo = m_engine.channelCount() > 1 &&
+                                m_pairL != m_pairR;
+            m_stereo->setMonoSource(!stereo);
+            if (stereo &&
+                m_engine.latest(m_pairL, kStereoWin, m_bufL) &&
+                m_engine.latest(m_pairR, kStereoWin, m_bufR)) {
+                m_stereo->setData(m_bufL, m_bufR, dt);
+                mv.correlation = m_stereo->correlation();
+                double sl = 0.0, sr = 0.0;
+                for (int i = 0; i < kStereoWin; ++i) {
+                    sl += double(m_bufL[i]) * m_bufL[i];
+                    sr += double(m_bufR[i]) * m_bufR[i];
+                }
+                if (sl > 0.0 && sr > 0.0)
+                    mv.balance = 10.0 * std::log10(sr / sl);
+            }
+        }
         for (auto &pr : m_readouts) {
             pr.second->set(metricCaption(pr.first), metricValue(pr.first, mv),
                            metricSuffix(pr.first));
@@ -2200,6 +2242,12 @@ private:
     QDoubleSpinBox *m_calSpin;
     QLabel *m_apiLbl;
     QLabel *m_clipLbl;
+    // ~170 ms at 48 kHz: long enough for a steady correlation reading, short
+    // enough that the goniometer trail stays lively.
+    static constexpr int kStereoWin = 8192;
+    std::vector<float> m_bufL, m_bufR;
+    StereoScope *m_stereo;
+    QWidget *m_stereoPage;
     RtaWidget *m_rta;
     RtaWidget *m_loudRta;              // the one under the loudness meter
     std::vector<RtaWidget *> m_rtas;   // every RTA that view settings apply to
@@ -2353,6 +2401,42 @@ static bool loudnessSelftest() {
     return ok;
 }
 
+// Stereo correlation has exact answers for the cases that matter.
+static bool stereoSelftest() {
+    bool ok = true;
+    constexpr int N = 4096;
+    std::vector<float> a(N), b(N), c(N), z(N, 0.0f);
+    for (int i = 0; i < N; ++i) {
+        a[i] = float(std::sin(2.0 * kPi * 440.0 * i / 48000.0));
+        b[i] = -a[i];                                        // polarity flip
+        c[i] = float(std::cos(2.0 * kPi * 440.0 * i / 48000.0));  // 90 deg
+    }
+    const double same = stereoCorrelation(a.data(), a.data(), N);
+    const double flip = stereoCorrelation(a.data(), b.data(), N);
+    const double quad = stereoCorrelation(a.data(), c.data(), N);
+    const double dead = stereoCorrelation(a.data(), z.data(), N);
+    std::printf("stereo: identical = %+.3f (expected +1), inverted = %+.3f "
+                "(expected -1), quadrature = %+.3f (expected ~0)\n",
+                same, flip, quad);
+    std::printf("stereo: against silence = %s (expected nan)\n",
+                std::isfinite(dead) ? "finite" : "nan");
+    ok = ok && std::fabs(same - 1.0) < 1e-9 && std::fabs(flip + 1.0) < 1e-9 &&
+         std::fabs(quad) < 0.02 && !std::isfinite(dead);
+
+    // Half-amplitude right channel: correlation is unaffected by level (it is
+    // normalised), which is what makes it a *phase* meter rather than a
+    // balance one.
+    std::vector<float> half(N);
+    for (int i = 0; i < N; ++i)
+        half[i] = a[i] * 0.5f;
+    const double lvl = stereoCorrelation(a.data(), half.data(), N);
+    std::printf("stereo: half-level right = %+.3f (expected +1, level "
+                "independent)\n",
+                lvl);
+    ok = ok && std::fabs(lvl - 1.0) < 1e-9;
+    return ok;
+}
+
 // Signal-loss detection: the two triggers must fire on their own horizons and
 // neither may fire on quiet-but-present programme material.
 static bool signalSelftest() {
@@ -2495,6 +2579,7 @@ static int selftest() {
     ok = metricsSelftest() && ok;
     ok = loudnessSelftest() && ok;
     ok = signalSelftest() && ok;
+    ok = stereoSelftest() && ok;
 
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

@@ -32,6 +32,8 @@ struct MetricValues {
     double doseNiosh = kNaN, doseOsha = kNaN;   // percent of daily dose
     LoudnessValues loud;                        // Program mode only
     double toTarget = kNaN;                     // integrated - target, LU
+    double correlation = kNaN;                  // stereo pair, -1..+1
+    double balance = kNaN;                      // R - L level difference, dB
 };
 
 class MetricsEngine {
@@ -165,6 +167,27 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+
+// Phase correlation between two channels: +1 identical (mono), 0 unrelated
+// (wide stereo), -1 inverted. Audio is already zero-mean, so this is the
+// plain normalised inner product rather than a mean-subtracted Pearson r.
+//
+// The number that matters for a stream: a sustained negative reading means
+// one channel is polarity-flipped, which sounds fine in the room and
+// *cancels* for anyone listening in mono — phone speakers, most TVs, i.e.
+// most of the audience. Returns NaN when either channel is silent, since
+// correlation is undefined there rather than zero.
+inline double stereoCorrelation(const float *l, const float *r, int n) {
+    double sll = 0.0, srr = 0.0, slr = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double a = l[i], b = r[i];
+        sll += a * a;
+        srr += b * b;
+        slr += a * b;
+    }
+    const double d = std::sqrt(sll * srr);
+    return d > 1e-20 ? std::clamp(slr / d, -1.0, 1.0) : kNaN;
+}
 
 enum SignalState { SignalOk = 0, SignalSilent = 1, SignalBlack = 2 };
 
