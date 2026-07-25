@@ -114,6 +114,15 @@ public:
         update();
     }
 
+    // Drop the displayed spectrum and its decay/peak state, so nothing
+    // carries across a change of reference (e.g. a mode switch).
+    void clearData() {
+        m_disp.clear();
+        m_dispHi.clear();
+        m_peaks.clear();
+        update();
+    }
+
     void setData(const std::vector<double> &bands,
                  const std::vector<double> &hires,
                  const std::vector<double> &peaks, double yMin, double yMax,
@@ -440,6 +449,16 @@ public:
         update();
     }
 
+    // Wipe the heat map — on a mode switch the old columns were painted
+    // against a different reference and would read as real history.
+    void clear() {
+        m_img.fill(m_lut[0]);
+        std::fill(m_vals.begin(), m_vals.end(), kEmpty);
+        std::fill(m_accum.begin(), m_accum.end(), 0.0);
+        m_accumN = 0;
+        update();
+    }
+
     void pushColumn(const std::vector<double> &power, double df) {
         if (power.empty() || df <= 0)
             return;
@@ -744,6 +763,11 @@ public:
     void setRange(double yMin, double yMax) {
         m_yMin = yMin;  // fallback range until there is data to scale to
         m_yMax = yMax;
+    }
+
+    void clear() {
+        m_pts.clear();
+        update();
     }
 
 protected:
@@ -1431,6 +1455,11 @@ public:
         m_sparkCaption = c;
         if (m_spark)
             m_spark->setCaption(c);
+    }
+
+    void clearSpark() {
+        if (m_spark)
+            m_spark->clear();
     }
 
     void pushSpark(qint64 t, double splDb) {

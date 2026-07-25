@@ -108,6 +108,10 @@ public:
 
     void setSnapshot(const Snapshot &s) { m_snap = s; }
 
+    // Mode switches change what the samples mean (dB SPL vs LUFS), so the
+    // series has to start over rather than splice two references together.
+    void clearHistory() { m_hist.clear(); }
+
     void pushHistory(const HistSample &h) {
         m_hist.push_back(h);
         while (m_hist.size() > kMaxHist)

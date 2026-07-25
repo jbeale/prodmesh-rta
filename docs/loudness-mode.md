@@ -46,17 +46,20 @@ run on different machines anyway.
 
 ## Capture path (operational, not code)
 
-Qt captures from *input* devices, and the stream bus is not one.
+Qt captures from *input* devices, and the programme bus is not one.
 
-- **macOS**: BlackHole (2ch) as OBS's Monitoring Device, sources set to
-  "Monitor and Output". Appears as a normal input. Still trips the mic TCC
-  prompt.
+- **macOS**: BlackHole (2ch), standalone or inside an Aggregate Device so the
+  operator can monitor and meter at once. Appears as a normal input; still
+  trips the mic TCC prompt.
 - **Windows**: Qt6 `QAudioSource` enumerates capture endpoints, not WASAPI
-  loopback — use VB-Audio Virtual Cable (or Stereo Mix) as the OBS monitor
-  target.
+  loopback — VB-Audio Virtual Cable, or Stereo Mix where the interface has it.
 
-Tapping OBS's monitor path is correct: post-fader, post-filter, and it matches
-what gets encoded.
+Measure as late in the chain as possible (post master fader, post bus
+processing) so the numbers match what gets encoded.
+
+The intended long-term route is a **ProdMesh insert plugin (VST3/AU)** that
+sends the bus straight to the app, removing the loopback-device step
+altogether. Not built yet — do not document it as available.
 
 ---
 

@@ -208,22 +208,21 @@ Integrated loudness and the true-peak maximum are **session** metrics, so hit
 **Reset Leq/Peaks** when the stream starts. Loudness is the BS.1770 sum of the
 stereo pair chosen in the dialog; the RTA keeps following the **Ch** selector.
 
-Getting the stream audio in needs a loopback device, because Qt only captures
-from *inputs*:
+The app captures from *input* devices, so the programme bus has to reach it as
+one — via an aggregate or loopback device:
 
-- **macOS** — install [BlackHole](https://existential.audio/blackhole/) (2ch),
-  set it as OBS's Monitoring Device, and set the sources you want measured to
-  "Monitor and Output".
-- **Windows** — Qt enumerates capture endpoints, not WASAPI loopback, so route
-  OBS's monitor output to VB-Audio Virtual Cable (or use Stereo Mix if your
-  interface exposes it).
+- **macOS** — [BlackHole](https://existential.audio/blackhole/) (2ch), either
+  on its own or inside an Aggregate Device so you can monitor and meter at the
+  same time. Point your playback/streaming app's output or monitor path at it.
+- **Windows** — Qt enumerates capture endpoints, not WASAPI loopback, so use
+  VB-Audio Virtual Cable (or Stereo Mix, if your interface exposes it).
 
-Tapping OBS's monitor path is the right place to measure: post-fader,
-post-filter, and it matches what gets encoded. Pick a target from the presets
-(YouTube/Spotify/Twitch −14 LUFS, Apple Podcasts −16, EBU R128 −23, ATSC A/85
-−24) and keep true peak under the ceiling — lossy encoders reconstruct
-inter-sample peaks that plain sample-peak metering never sees, which is why
-−1 dBTP is the usual safe limit.
+Measure as late in the chain as you can — after the master fader and any bus
+processing — so the numbers match what actually gets encoded. Pick a target
+from the presets (YouTube/Spotify/Twitch −14 LUFS, Apple Podcasts −16, EBU
+R128 −23, ATSC A/85 −24) and keep true peak under the ceiling: lossy encoders
+reconstruct inter-sample peaks that plain sample-peak metering never sees,
+which is why −1 dBTP is the usual safe limit.
 
 ### Calibration
 

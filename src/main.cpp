@@ -834,8 +834,8 @@ public:
             "Acoustic anchors every level to the Cal offset for true dB SPL.\n"
             "Program meters a digital bus against full scale: no calibration,\n"
             "K-weighted loudness and true peak instead of Leq and dose.\n"
-            "Capture the stream with a loopback device (BlackHole on macOS,\n"
-            "VB-Audio Virtual Cable on Windows) fed by OBS's monitor output.");
+            "Route the programme in through an aggregate or loopback device\n"
+            "so the bus arrives as an ordinary capture input.");
         modeHint->setStyleSheet("color:#8a92a6; font-size:11px;");
         modeForm->addRow(modeHint);
         inLay->addWidget(modeGroup);
@@ -1682,8 +1682,18 @@ private:
         m_loudMeter->resetSession();
         m_breakout->setSparkCaption(program ? "LOUDNESS — 10 MIN"
                                             : "SPL — 10 MIN");
+        // Wipe every accumulated view and statistic: the two modes measure
+        // against different references, so anything carried across would be
+        // plotted on a scale it was never measured in.
         m_analyzer.resetAll();
         m_metricsEng.resetAll();
+        m_history->clear();
+        m_spectro->clear();
+        m_breakout->clearSpark();
+        m_breakout->resetMaxima();
+        m_api->clearHistory();
+        for (RtaWidget *r : m_rtas)
+            r->clearData();
         applyMetricsConfig();
         m_tabs->setCurrentIndex(
             std::clamp(m_savedTabIdx, 0, m_tabs->count() - 1));
