@@ -2084,6 +2084,7 @@ private:
                 }
                 if (sl > 0.0 && sr > 0.0)
                     mv.balance = 10.0 * std::log10(sr / sl);
+                m_stereo->setBalance(mv.balance);
             }
         }
         for (auto &pr : m_readouts) {

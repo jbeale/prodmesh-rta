@@ -1108,6 +1108,10 @@ public:
         update();
     }
 
+    // R minus L in dB, from the caller so it is the same number the metric
+    // registry publishes rather than a second, subtly different one.
+    void setBalance(double db) { m_balance = db; }
+
     void setData(const std::vector<float> &l, const std::vector<float> &r,
                  double dt) {
         const int n = int(std::min(l.size(), r.size()));
@@ -1148,7 +1152,8 @@ protected:
         qp.setFont(f);
         const int capH = QFontMetrics(f).height();
         const int barH = 16;
-        const int foot = barH + capH * 2 + 14;
+        // 8 top + side + 8 + bar + 2 + labels + 2 + verdict + 6 bottom.
+        const int foot = barH + capH * 2 + 26;
         const int side = std::max(60, std::min(width() - 24, height() - foot));
         const int gx = (width() - side) / 2;
         const int gy = 8;
@@ -1211,6 +1216,11 @@ protected:
         qp.setPen(QColor(std::isfinite(m_corr) ? corrColor(m_corr) : "#8a92a6"));
         qp.drawText(QRect(bx, ly + capH + 2, bw, capH), Qt::AlignHCenter,
                     verdict());
+
+        // A goniometer is square, so on a wide window there is dead space
+        // either side. Put the numbers there rather than leaving it empty.
+        if (gx >= 150)
+            drawReadouts(qp, 14, gy, gx - 26, f, capH);
     }
 
 private:
@@ -1219,6 +1229,52 @@ private:
 
     static const char *corrColor(double c) {
         return c < 0.0 ? "#e05c5c" : c < 0.3 ? "#e8c84b" : "#2fbf9b";
+    }
+
+    void drawReadouts(QPainter &qp, int x, int y, int w, const QFont &capF,
+                      int capH) {
+        QFont numF = capF;
+        numF.setFamilies({"Consolas", "Menlo", "Courier New"});
+        numF.setBold(true);
+        numF.setPointSize(std::clamp(w / 7, 13, 28));
+        const int numH = QFontMetrics(numF).height();
+
+        auto row = [&](const QString &cap, const QString &val,
+                       const char *color) {
+            qp.setFont(capF);
+            qp.setPen(theme::text);
+            qp.drawText(QRect(x, y, w, capH), Qt::AlignLeft, cap);
+            y += capH;
+            qp.setFont(numF);
+            qp.setPen(QColor(color));
+            qp.drawText(QRect(x, y, w, numH), Qt::AlignLeft, val);
+            y += numH + 10;
+        };
+
+        row("CORRELATION",
+            std::isfinite(m_corr) ? QString::number(m_corr, 'f', 2)
+                                  : QString("--.-"),
+            std::isfinite(m_corr) ? corrColor(m_corr) : "#8a92a6");
+        // Balance is a level difference, so it is judged on magnitude:
+        // anything past a dB or so is an audible lean.
+        row("BALANCE",
+            std::isfinite(m_balance)
+                ? QString("%1%2 dB")
+                      .arg(m_balance >= 0 ? "+" : "")
+                      .arg(m_balance, 0, 'f', 1)
+                : QString("--.-"),
+            !std::isfinite(m_balance)      ? "#8a92a6"
+            : std::fabs(m_balance) <= 1.0  ? "#2fbf9b"
+            : std::fabs(m_balance) <= 3.0  ? "#e8c84b"
+                                           : "#e05c5c");
+
+        qp.setFont(capF);
+        qp.setPen(theme::text);
+        qp.drawText(QRect(x, y, w, capH * 6),
+                    Qt::AlignLeft | Qt::TextWordWrap,
+                    "A vertical cloud is normal stereo. Horizontal means a "
+                    "channel is polarity-flipped — it sounds fine here and "
+                    "cancels for anyone listening in mono.");
     }
 
     QString verdict() const {
@@ -1237,6 +1293,7 @@ private:
 
     QImage m_dots;
     double m_corr = kNaN;
+    double m_balance = kNaN;
     double m_negS = 0.0;  // seconds of sustained negative correlation
     bool m_mono = false;
 };
