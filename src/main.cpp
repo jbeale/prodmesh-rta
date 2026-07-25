@@ -704,7 +704,8 @@ public:
         // Program-mode loudness view. Built always, but only added to the tab
         // bar in Program mode (see applyMode).
         m_loudMeter = new LoudnessMeter;
-        m_loudPage = new QWidget;
+        m_loudPage = new QWidget(this);
+        m_loudPage->hide();
         auto *loudLay = new QVBoxLayout(m_loudPage);
         loudLay->setContentsMargins(0, 4, 0, 0);
         loudLay->addWidget(m_loudMeter, 1);
@@ -1637,7 +1638,11 @@ private:
         if (program && at < 0) {
             m_tabs->insertTab(0, m_loudPage, "Loudness");
         } else if (!program && at >= 0) {
+            // removeTab does not delete the page and leaves it parentless;
+            // re-own it here so it is not leaked and cannot show up as a
+            // stray top-level window.
             m_tabs->removeTab(at);
+            m_loudPage->setParent(this);
             m_loudPage->hide();
         }
 
