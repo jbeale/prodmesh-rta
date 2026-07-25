@@ -171,10 +171,17 @@ private:
     // rather than making people hit Reset to get honest numbers.
     static constexpr double kSettleS = 0.3;
 
-    void resetLoudnessAccum() {
+    // Between sub-blocks: clear the accumulator only. Re-arming the settling
+    // window here would discard 300 ms of every 400 ms.
+    void resetSubBlock() {
         std::fill(m_sumSq.begin(), m_sumSq.end(), 0.0);
         m_subN = 0;
         m_subTp = 0.0;
+    }
+
+    // On a (re)start: also re-arm the settling window.
+    void resetLoudnessAccum() {
+        resetSubBlock();
         m_settle = int(kSettleS * std::max(1, m_format.sampleRate()));
     }
 
@@ -286,7 +293,7 @@ private:
                         b.z += m_sumSq[c] / m_subN;
                     b.tpLin = m_subTp;
                     m_loudQ.push_back(b);
-                    resetLoudnessAccum();
+                    resetSubBlock();
                 }
             }
         }
