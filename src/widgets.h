@@ -1112,6 +1112,10 @@ public:
     // registry publishes rather than a second, subtly different one.
     void setBalance(double db) { m_balance = db; }
 
+    // LU lost when the pair is summed to mono — the most actionable number
+    // here, since it is in the same units as the delivery target.
+    void setMonoDelta(double lu) { m_monoDelta = lu; }
+
     void setData(const std::vector<float> &l, const std::vector<float> &r,
                  double dt) {
         const int n = int(std::min(l.size(), r.size()));
@@ -1268,13 +1272,24 @@ private:
             : std::fabs(m_balance) <= 3.0  ? "#e8c84b"
                                            : "#e05c5c");
 
+        // Losing a little is normal — genuinely uncorrelated stereo gives
+        // about -3 LU. Past ~3 LU something is fighting itself.
+        row("MONO LOSS",
+            std::isfinite(m_monoDelta)
+                ? QString("%1 LU").arg(m_monoDelta, 0, 'f', 1)
+                : QString("--.-"),
+            !std::isfinite(m_monoDelta)   ? "#8a92a6"
+            : m_monoDelta >= -3.0         ? "#2fbf9b"
+            : m_monoDelta >= -6.0         ? "#e8c84b"
+                                          : "#e05c5c");
+
         qp.setFont(capF);
         qp.setPen(theme::text);
         qp.drawText(QRect(x, y, w, capH * 6),
                     Qt::AlignLeft | Qt::TextWordWrap,
                     "A vertical cloud is normal stereo. Horizontal means a "
                     "channel is polarity-flipped — it sounds fine here and "
-                    "cancels for anyone listening in mono.");
+                    "cancels for anyone on a phone or TV speaker.");
     }
 
     QString verdict() const {
@@ -1294,6 +1309,7 @@ private:
     QImage m_dots;
     double m_corr = kNaN;
     double m_balance = kNaN;
+    double m_monoDelta = kNaN;
     double m_negS = 0.0;  // seconds of sustained negative correlation
     bool m_mono = false;
 };

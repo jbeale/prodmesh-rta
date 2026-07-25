@@ -144,6 +144,9 @@ static const MetricInfo kMetricInfos[] = {
     {"dbtpMax", "True peak — session max", kProgramOnly},
     {"plr", "Peak to loudness ratio", kProgramOnly},
     {"corr", "Stereo correlation", kProgramOnly},
+    {"monoDelta", "Mono compatibility (LU lost)", kProgramOnly},
+    {"dbtpL", "True peak — left", kProgramOnly},
+    {"dbtpR", "True peak — right", kProgramOnly},
     {"balance", "L/R balance", kProgramOnly},
 };
 
@@ -1419,6 +1422,9 @@ private:
         if (id == "dbtpMax") return QString("TP MAX (dBTP)");
         if (id == "plr") return QString("PLR (LU)");
         if (id == "corr") return QString("CORRELATION");
+        if (id == "monoDelta") return QString("MONO LOSS (LU)");
+        if (id == "dbtpL") return QString("TP L (dBTP)");
+        if (id == "dbtpR") return QString("TP R (dBTP)");
         if (id == "balance") return QString("BALANCE (dB)");
         return id;
     }
@@ -1445,6 +1451,9 @@ private:
         if (id == "dbtpMax") return v.loud.truePeakMax;
         if (id == "plr") return v.loud.plr;
         if (id == "corr") return v.correlation;
+        if (id == "monoDelta") return v.loud.monoDelta;
+        if (id == "dbtpL") return v.loud.truePeakMaxL;
+        if (id == "dbtpR") return v.loud.truePeakMaxR;
         if (id == "balance") return v.balance;
         return kNaN;
     }
@@ -2085,6 +2094,7 @@ private:
                 if (sl > 0.0 && sr > 0.0)
                     mv.balance = 10.0 * std::log10(sr / sl);
                 m_stereo->setBalance(mv.balance);
+                m_stereo->setMonoDelta(m_loudVals.monoDelta);
             }
         }
         for (auto &pr : m_readouts) {
@@ -2444,6 +2454,38 @@ static bool stereoSelftest() {
                 "independent)\n",
                 lvl);
     ok = ok && std::fabs(lvl - 1.0) < 1e-9;
+
+    // Mono-sum power, against the three cases with known answers. Fed the
+    // K-weighted pair the way AudioEngine accumulates it.
+    auto monoLu = [&](const std::vector<float> &l,
+                      const std::vector<float> &r) {
+        KWeightFilter kl, kr;
+        kl.design(48000.0);
+        kr.design(48000.0);
+        double sll = 0.0, srr = 0.0, slr = 0.0;
+        int used = 0;
+        for (int i = 0; i < N; ++i) {
+            const double x = kl.step(l[i]), y = kr.step(r[i]);
+            if (i < 512)  // let the filters settle
+                continue;
+            sll += x * x;
+            srr += y * y;
+            slr += x * y;
+            ++used;
+        }
+        const double zs = (sll + srr) / used;
+        const double zm = monoSumZ(sll, srr, slr, used);
+        return zm > 0.0 ? 10.0 * std::log10(zm / zs) : -60.0;
+    };
+    const double dSame = monoLu(a, a);
+    const double dFlip = monoLu(a, b);
+    const double dQuad = monoLu(a, c);
+    std::printf("mono sum: identical = %+.2f LU (expected 0.00), inverted = "
+                "%+.1f LU (expected total loss), uncorrelated = %+.2f LU "
+                "(expected -3.01)\n",
+                dSame, dFlip, dQuad);
+    ok = ok && std::fabs(dSame) < 0.01 && dFlip < -40.0 &&
+         std::fabs(dQuad + 3.01) < 0.1;
     return ok;
 }
 

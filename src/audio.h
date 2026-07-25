@@ -191,6 +191,9 @@ private:
         std::fill(m_sumSq.begin(), m_sumSq.end(), 0.0);
         m_subN = 0;
         m_subTp = 0.0;
+        m_subTpL = 0.0;
+        m_subTpR = 0.0;
+        m_sumCross = 0.0;
     }
 
     // On a (re)start: also re-arm the settling window.
@@ -299,23 +302,44 @@ private:
             if (!m_loudCh.empty()) {
                 // The filters are driven throughout so their state settles,
                 // but nothing is measured until the settling window expires.
-                for (int c : m_loudCh) {
+                double k0 = 0.0, k1 = 0.0;
+                for (size_t j = 0; j < m_loudCh.size(); ++j) {
+                    const int c = m_loudCh[j];
                     const double k = m_kw[c].step(fr[c]);
                     const double t = m_tp[c].step(fr[c]);
                     if (m_settle > 0)
                         continue;
                     m_sumSq[c] += k * k;
                     m_subTp = std::max(m_subTp, t);
+                    if (j == 0) {
+                        k0 = k;
+                        m_subTpL = std::max(m_subTpL, t);
+                    } else {
+                        k1 = k;
+                        m_subTpR = std::max(m_subTpR, t);
+                    }
                 }
                 if (m_settle > 0) {
                     --m_settle;
-                } else if (++m_subN >= m_subSamples) {
-                    LoudnessBlock b;
-                    for (int c : m_loudCh)
-                        b.z += m_sumSq[c] / m_subN;
-                    b.tpLin = m_subTp;
-                    m_loudQ.push_back(b);
-                    resetSubBlock();
+                } else {
+                    if (m_loudCh.size() > 1)
+                        m_sumCross += k0 * k1;
+                    if (++m_subN >= m_subSamples) {
+                        LoudnessBlock b;
+                        for (int c : m_loudCh)
+                            b.z += m_sumSq[c] / m_subN;
+                        // A mono source loses nothing by being summed.
+                        b.zMono = m_loudCh.size() > 1
+                                      ? monoSumZ(m_sumSq[m_loudCh[0]],
+                                                 m_sumSq[m_loudCh[1]],
+                                                 m_sumCross, m_subN)
+                                      : b.z;
+                        b.tpLin = m_subTp;
+                        b.tpL = m_subTpL;
+                        b.tpR = m_subTpR;
+                        m_loudQ.push_back(b);
+                        resetSubBlock();
+                    }
                 }
             }
         }
@@ -351,4 +375,6 @@ private:
     int m_subN = 0;
     int m_settle = 0;  // frames still to discard after a (re)start
     double m_subTp = 0.0;
+    double m_subTpL = 0.0, m_subTpR = 0.0;
+    double m_sumCross = 0.0;  // sum of kL*kR, for the mono-sum power
 };

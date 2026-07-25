@@ -259,8 +259,26 @@ private:
 // windows the RTA path grabs.
 struct LoudnessBlock {
     double z = 0.0;      // sum over channels of mean-square K-weighted
-    double tpLin = 0.0;  // max |interpolated sample|, linear
+    double zMono = 0.0;  // same for the mono sum; see monoSumZ()
+    double tpLin = 0.0;  // max |interpolated sample| over the pair, linear
+    double tpL = 0.0, tpR = 0.0;  // per channel
 };
+
+// Power of the mono sum, in the same units as the stereo z, from the summed
+// products of the K-weighted pair.
+//
+// "Summed to mono" is modelled as (L+R)/2 played on *both* channels, not as a
+// single channel carrying L+R. That is what makes the number mean what people
+// expect: identical channels give exactly 0 LU of loss rather than an
+// artefactual -3, a polarity flip gives total cancellation, and genuinely
+// uncorrelated stereo gives the familiar -3 LU. Counting channels differently
+// on the two sides would bake a constant offset into every reading.
+//
+// K-weighting is linear, so K((L+R)/2) = (K(L)+K(R))/2 and the whole thing
+// falls out of the sums the loudness path already accumulates.
+inline double monoSumZ(double sumLL, double sumRR, double sumLR, double n) {
+    return (sumLL + sumRR + 2.0 * sumLR) / (2.0 * n);
+}
 
 struct AnalyzerResult {
     double fast = kNaN;

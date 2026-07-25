@@ -19,7 +19,9 @@ struct LoudnessValues {
     double integrated = kNaN;   // LUFS, gated, since the last session reset
     double truePeak = kNaN;     // dBTP over the last 400 ms
     double truePeakMax = kNaN;  // dBTP since the last session reset
+    double truePeakMaxL = kNaN, truePeakMaxR = kNaN;  // per channel
     double plr = kNaN;          // peak-to-loudness ratio, LU
+    double monoDelta = kNaN;    // LU lost when summed to mono (<= 0)
 };
 
 struct MetricValues {
@@ -304,10 +306,14 @@ public:
         m_binN.assign(kBins, 0);
         m_binP.assign(kBins, 0.0);
         m_tpMax = 0.0;
+        m_tpMaxL = 0.0;
+        m_tpMaxR = 0.0;
     }
 
     void push(const LoudnessBlock &b) {
         m_tpMax = std::max(m_tpMax, b.tpLin);
+        m_tpMaxL = std::max(m_tpMaxL, b.tpL);
+        m_tpMaxR = std::max(m_tpMaxR, b.tpR);
         m_sub.push_back(b);
         while (m_sub.size() > size_t(kShortSubs))
             m_sub.pop_front();
@@ -334,11 +340,30 @@ public:
             if (tp > 0.0)
                 v.truePeak = 20.0 * std::log10(tp);
         }
-        if (m_sub.size() >= size_t(kShortSubs))
-            v.shortTerm = loudness(meanZ(kShortSubs));
+        if (m_sub.size() >= size_t(kShortSubs)) {
+            const double zs = meanZ(kShortSubs);
+            v.shortTerm = loudness(zs);
+            // Mono compatibility over the same 3 s window: how much level
+            // survives the sum. Floored at -60 LU — past that it is total
+            // cancellation and the exact figure stops meaning anything.
+            if (zs > 0.0) {
+                double zm = 0.0;
+                for (size_t i = m_sub.size() - kShortSubs; i < m_sub.size();
+                     ++i)
+                    zm += m_sub[i].zMono;
+                zm /= kShortSubs;
+                v.monoDelta = zm > 0.0
+                                  ? std::max(-60.0, 10.0 * std::log10(zm / zs))
+                                  : -60.0;
+            }
+        }
         v.integrated = integrated();
         if (m_tpMax > 0.0)
             v.truePeakMax = 20.0 * std::log10(m_tpMax);
+        if (m_tpMaxL > 0.0)
+            v.truePeakMaxL = 20.0 * std::log10(m_tpMaxL);
+        if (m_tpMaxR > 0.0)
+            v.truePeakMaxR = 20.0 * std::log10(m_tpMaxR);
         if (std::isfinite(v.integrated) && std::isfinite(v.truePeakMax))
             v.plr = v.truePeakMax - v.integrated;
         return v;
@@ -386,4 +411,5 @@ private:
     std::vector<qint64> m_binN = std::vector<qint64>(kBins, 0);
     std::vector<double> m_binP = std::vector<double>(kBins, 0.0);
     double m_tpMax = 0.0;
+    double m_tpMaxL = 0.0, m_tpMaxR = 0.0;
 };
