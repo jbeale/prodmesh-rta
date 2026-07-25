@@ -1842,6 +1842,15 @@ private:
         };
         pick(m_pairLCombo, m_pairL, 0);
         pick(m_pairRCombo, m_pairR, 1);
+        // Recover a collapsed pair. A device that reports one channel — which
+        // includes a device still opening, e.g. behind the macOS microphone
+        // prompt — clamps R onto L, and without this the pair would stay
+        // degenerate once the real channel count arrived, silently disabling
+        // every stereo measurement.
+        if (n > 1 && m_pairL == m_pairR) {
+            m_pairR = m_pairL == 0 ? 1 : 0;
+            m_pairRCombo->setCurrentIndex(m_pairRCombo->findData(m_pairR));
+        }
         m_pairLCombo->blockSignals(false);
         m_pairRCombo->blockSignals(false);
         m_engine.setLoudness(m_mode == ModeProgram, m_pairL, m_pairR);
