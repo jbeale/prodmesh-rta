@@ -80,6 +80,7 @@ public:
         // peak-since-last-read are stale.
         m_peak = 0.0f;
         m_peakC = 0.0f;
+        m_peakMon = 0.0f;
         m_cw.reset();
     }
     int channel() const { return m_channel; }
@@ -109,11 +110,23 @@ public:
     // the last call.
     bool latest(int n, std::vector<float> &out, float &peakOut,
                 float &peakCOut) {
+        float mon = 0.0f;
+        return latest(n, out, peakOut, peakCOut, mon);
+    }
+
+    // `peakMonOut` is the peak across every channel feeding the active
+    // measurement — the analysis channel in Acoustic, the stereo pair in
+    // Program. Signal-loss detection watches this rather than the analysis
+    // channel alone, so one live channel of a pair still counts as audio.
+    bool latest(int n, std::vector<float> &out, float &peakOut,
+                float &peakCOut, float &peakMonOut) {
         QMutexLocker lock(&m_mutex);
         peakOut = m_peak;
         m_peak = 0.0f;
         peakCOut = m_peakC;
         m_peakC = 0.0f;
+        peakMonOut = m_peakMon;
+        m_peakMon = 0.0f;
         const int sel = (m_channel >= 0 && m_channel < m_ch) ? m_channel : -1;
         return copyOut(sel, n, out);
     }
@@ -138,6 +151,7 @@ private:
         m_total = 0;
         m_peak = 0.0f;
         m_peakC = 0.0f;
+        m_peakMon = 0.0f;
         applyLoudnessRequest();
     }
 
@@ -274,6 +288,14 @@ private:
             if (magC > m_peakC)
                 m_peakC = magC;
 
+            // Signal-presence peak: the loudness pair when Program mode is
+            // measuring it, otherwise the analysis channel.
+            float magMon = mag;
+            for (int c : m_loudCh)
+                magMon = std::max(magMon, std::fabs(fr[c]));
+            if (magMon > m_peakMon)
+                m_peakMon = magMon;
+
             if (!m_loudCh.empty()) {
                 // The filters are driven throughout so their state settles,
                 // but nothing is measured until the settling window expires.
@@ -311,6 +333,7 @@ private:
     qint64 m_total = 0;
     float m_peak = 0.0f;
     float m_peakC = 0.0f;
+    float m_peakMon = 0.0f;  // signal-presence peak, see latest()
     int m_channel = 0;  // 0-based capture channel; -1 = mix of all
     CWeightFilter m_cw;
 

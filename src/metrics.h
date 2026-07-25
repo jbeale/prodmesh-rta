@@ -166,6 +166,77 @@ private:
 
 // ---------------------------------------------------------------------------
 
+enum SignalState { SignalOk = 0, SignalSilent = 1, SignalBlack = 2 };
+
+struct SignalStatus {
+    int state = SignalOk;
+    double silentForS = 0.0;   // length of the current quiet run
+    qint64 lastAudioMs = 0;    // when audio above the threshold was last seen
+};
+
+// Signal-loss detection. Two triggers, because they mean different things:
+//
+//   Digital black — samples exactly zero. The route is dead (device unplugged,
+//   virtual cable with nothing feeding it, crashed sender). Unambiguous, so it
+//   needs no threshold and can fire in about a second.
+//
+//   Silence — below a set floor but not zero. A source is muted, a fader is
+//   down, the wrong scene is live. This one needs a generous horizon: a pause
+//   between songs, or after "let's pray", is not a failure.
+//
+// Note what this deliberately cannot do: report that the app itself died. A
+// crashed process looks exactly like a healthy quiet one from outside, so
+// consumers must also watch the snapshot's time_ms go stale. See
+// docs/loudness-mode.md.
+class SignalMonitor {
+public:
+    bool enabled = true;
+    double thresholdDb = -60.0;  // dBFS; below this counts as silence
+    double silenceHoldS = 15.0;  // before low-level silence is reported
+    double blackHoldS = 1.0;     // digital black is unambiguous, so fire fast
+
+    void reset(qint64 nowMs) {
+        m_quietS = 0.0;
+        m_blackS = 0.0;
+        m_lastAudioMs = nowMs;
+    }
+
+    // peakLin is the largest sample magnitude seen over dt seconds, across
+    // whichever channels feed the active measurement.
+    void push(double peakLin, double dt, qint64 nowMs) {
+        const bool black = peakLin <= 0.0;
+        const double db = black ? -1e300 : 20.0 * std::log10(peakLin);
+        m_blackS = black ? m_blackS + dt : 0.0;
+        if (db < thresholdDb) {
+            m_quietS += dt;
+        } else {
+            m_quietS = 0.0;
+            m_lastAudioMs = nowMs;
+        }
+    }
+
+    SignalStatus status() const {
+        SignalStatus s;
+        s.silentForS = m_quietS;
+        s.lastAudioMs = m_lastAudioMs;
+        if (!enabled)
+            return s;
+        // Black wins: it is the more specific diagnosis of the same silence.
+        if (m_blackS >= blackHoldS)
+            s.state = SignalBlack;
+        else if (m_quietS >= silenceHoldS)
+            s.state = SignalSilent;
+        return s;
+    }
+
+private:
+    double m_quietS = 0.0;
+    double m_blackS = 0.0;
+    qint64 m_lastAudioMs = 0;
+};
+
+// ---------------------------------------------------------------------------
+
 // EBU R128 / ITU-R BS.1770 loudness from gapless 100 ms sub-blocks.
 //
 // Momentary and short-term are plain sliding windows over those sub-blocks.

@@ -33,6 +33,14 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
   }
   #alarmbanner.warn { display: block; background: #4a4020; color: var(--warn); }
   #alarmbanner.alert { display: block; background: #4a2020; color: var(--alert); }
+  /* Signal loss outranks a level alarm: no audio is the worse problem.
+     Solid, never flashing — the running timer carries the urgency. */
+  #signalbanner {
+    display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 6px;
+    background: #4a2020; color: var(--alert); font-weight: 700; font-size: 19px;
+    letter-spacing: 1px; text-align: center;
+  }
+  #signalbanner.on { display: block; }
   .bigrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
             gap: 10px; margin-bottom: 10px; }
   .tile {
@@ -70,6 +78,7 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
   <span id="status" class="down">connecting…</span>
   <span id="modeinfo"></span>
 </header>
+<div id="signalbanner"></div>
 <div id="alarmbanner"></div>
 <div class="bigrow" id="bigrow"></div>
 <div class="gridrow" id="gridrow"></div>
@@ -166,6 +175,25 @@ function setGauges(m, targets) {
   }
 }
 
+// Signal loss. The tab title is rewritten too: a dashboard left minimised on
+// someone's phone is the likeliest place this gets noticed.
+const BASE_TITLE = document.title;
+function setSignalUi(sig, timeMs) {
+  const el = document.getElementById("signalbanner");
+  if (!sig || sig.state === "ok" || !sig.enabled) {
+    el.className = "";
+    document.title = BASE_TITLE;
+    return;
+  }
+  const dead = sig.last_audio_ms ? Math.max(0, timeMs - sig.last_audio_ms) : 0;
+  const secs = Math.round(dead / 1000);
+  el.className = "on";
+  el.textContent =
+    (sig.state === "black" ? "NO AUDIO (digital black)" : "SILENT") +
+    " — " + secs + "s";
+  document.title = "⚠ NO AUDIO " + secs + "s — " + BASE_TITLE;
+}
+
 function setAlarmUi(alarm) {
   const banner = document.getElementById("alarmbanner");
   banner.className = "";
@@ -253,6 +281,7 @@ function connect() {
       document.getElementById("cap-" + id).textContent = caption(id, w, mode);
       document.getElementById("val-" + id).textContent = fmt(m[id], id);
     }
+    setSignalUi(d.signal, d.time_ms);
     setAlarmUi(d.alarm);
     setGauges(m, d.targets);
     drawRta(d);

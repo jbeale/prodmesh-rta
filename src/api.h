@@ -9,7 +9,13 @@
 //         ?since_ms=<epoch ms>  only samples newer than this (incremental poll)
 //         ?limit=<n>            at most n newest samples
 //   WS  /api/stream            pushes the /api/spl+/api/rta payload at the
-//                              configured stream rate (RFC 6455 text frames)
+//                              configured stream rate (RFC 6455 text frames),
+//                              plus {"type":"event", ...} on signal-loss edges
+//
+// Every payload carries `signal` (presence of audio) and `time_ms`. A consumer
+// watching for dead air needs both: the app reports silence it can hear, but a
+// crashed app looks exactly like a healthy quiet one, so `time_ms` going stale
+// is the other half of the check.
 //
 // JSON responses carry Access-Control-Allow-Origin: *. GET only — nothing on
 // this server mutates state. The WebSocket side is hand-rolled on QTcpServer
@@ -54,6 +60,12 @@ public:
         // before interpreting the metric ids below.
         QString mode = "acoustic";
         double targetLufs = kNaN, ceilDbtp = kNaN;  // program mode only
+        // Signal presence. `state` is "ok" | "silent" | "black".
+        QString signalState = "ok";
+        double silentForS = 0.0;
+        qint64 lastAudioMs = 0;
+        bool signalEnabled = true;
+        double signalThresholdDb = -60.0;
         // Derived SPL metrics (id -> value); see the Metrics dialog for ids.
         std::vector<std::pair<QString, double>> metrics;
         // Traffic-light alarm on one watched metric.
@@ -128,6 +140,20 @@ public:
             sendFrame(s, 0x1, payload);
     }
 
+    // Edge-triggered notification, so a consumer does not have to diff a
+    // 10 Hz level stream to notice something happened.
+    void broadcastEvent(const QString &event, const QJsonObject &detail = {}) {
+        if (m_streams.empty())
+            return;
+        QJsonObject o = detail;
+        o.insert("type", "event");
+        o.insert("event", event);
+        o.insert("time_ms", m_snap.timeMs);
+        const QByteArray payload = QJsonDocument(o).toJson(QJsonDocument::Compact);
+        for (QTcpSocket *s : m_streams)
+            sendFrame(s, 0x1, payload);
+    }
+
     // Best URL to reach this machine from the LAN.
     static QString localUrl(quint16 port) {
         for (const QHostAddress &a : QNetworkInterface::allAddresses())
@@ -167,10 +193,21 @@ private:
                  m_snap.peaks.empty() ? QJsonValue() : jarr(m_snap.peaks));
         o.insert("metrics", metricsJson());
         o.insert("alarm", alarmJson());
+        o.insert("signal", signalJson());
         o.insert("targets", targetsJson());
         if (m_snap.mode == "program")
             o.insert("loudness", loudnessJson());
         return o;
+    }
+
+    QJsonObject signalJson() const {
+        return QJsonObject{
+            {"state", m_snap.signalState},
+            {"silent_for_s", m_snap.silentForS},
+            {"last_audio_ms", m_snap.lastAudioMs},
+            {"enabled", m_snap.signalEnabled},
+            {"threshold_db", m_snap.signalThresholdDb},
+        };
     }
 
     // Program-mode delivery target, so a client can draw the same target
@@ -391,6 +428,7 @@ private:
                 {"mic_correction", m_snap.micCorr.isEmpty()
                                        ? QJsonValue()
                                        : QJsonValue(m_snap.micCorr)},
+                {"signal", signalJson()},
             });
         }
         if (path == "/api/spl") {
@@ -404,6 +442,7 @@ private:
                 {"leq_db", jnum(m_snap.leq)},
                 {"metrics", metricsJson()},
                 {"alarm", alarmJson()},
+                {"signal", signalJson()},
                 {"targets", targetsJson()},
             };
             if (m_snap.mode == "program")

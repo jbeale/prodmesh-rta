@@ -162,7 +162,11 @@ Build order: silence/dropout first (small, highest operational value, and it
 defines the `signal` + event plumbing everything else reuses), then the stereo
 tab, then the remaining QC items.
 
-## 1. Silence / dropout detection
+## 1. Silence / dropout detection — **implemented**
+
+`SignalMonitor` (metrics.h) fed by `AudioEngine`'s per-tick monitor peak,
+which covers the analysis channel in Acoustic and the stereo pair in Program
+— so one live channel of a pair still counts as audio.
 
 The design driver: **on an unattended stream box nobody is looking at the
 app.** The in-app banner is the least valuable channel; the API push is the

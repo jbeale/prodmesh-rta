@@ -41,8 +41,10 @@ The C++ version additionally has:
 - **Metric breakout** — a narrow always-on-top window of big readouts (with
   click-to-reset maxima and an SPL sparkline) to park next to your console
   software (**View → Metric Breakout**, Ctrl/Cmd+B)
-- **SPL alarms** — traffic-light thresholds on a watched metric; readouts
-  turn yellow/red everywhere, including the web dashboard
+- **Alarms** — traffic-light thresholds on a watched metric, plus **signal-loss
+  detection** (digital black after 1 s, low-level silence after a configurable
+  horizon) with a banner in the app and on the dashboard, a `signal` field on
+  every API payload, and an edge event on the WebSocket
   (**Settings → Alarms…**)
 - **SPL logging** — 1 Hz CSV of every metric for compliance records
   (**File → Start SPL Log…**); columns follow the active mode
@@ -311,6 +313,34 @@ reading them:
 - `program`: `laf las leq lzpk` (now dBFS) plus `lufsM lufsS lufsI toTarget
   dbtp dbtpMax plr`, and a `loudness` object with `target_lufs` and
   `ceiling_dbtp` so a client can draw the same target zone the app does
+
+### Detecting dead air
+
+Every payload carries a `signal` object:
+
+```json
+"signal": { "state": "ok", "silent_for_s": 0.0, "last_audio_ms": 1784957744422,
+            "enabled": true, "threshold_db": -60 }
+```
+
+`state` is `ok`, `silent` (below `threshold_db` for the configured horizon) or
+`black` (samples at exactly zero — the route is dead, reported after 1 s since
+it cannot be a musical pause). WebSocket clients also get an edge event so
+they don't have to diff the level stream:
+
+```json
+{ "type": "event", "event": "silence_start", "reason": "digital_black",
+  "threshold_db": -60, "last_audio_ms": 1784957744422, "time_ms": 1784957760001 }
+```
+
+**Watch `time_ms` as well.** The app can report silence it can hear, but it
+cannot report its own death — a crashed process or a dropped NIC looks
+exactly like a healthy quiet one. Treat a snapshot that stops advancing as its
+own alarm; that is the other half of dead-air detection.
+
+Configure the threshold and horizon under **Settings → Alarms…**. There is
+deliberately no audible alert: on a stream machine, system sound can land back
+in the capture path and go out on air.
 
 ### Live streaming
 

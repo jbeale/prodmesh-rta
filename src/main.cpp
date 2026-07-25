@@ -485,11 +485,15 @@ private:
 class AlarmsDialog : public QDialog {
 public:
     AlarmsDialog(QWidget *parent, int mode, bool enabled,
-                 const QString &metricId, double warnDb, double alertDb)
+                 const QString &metricId, double warnDb, double alertDb,
+                 bool sigEnabled, double sigThreshold, double sigHold)
         : QDialog(parent) {
         const bool program = mode == ModeProgram;
-        setWindowTitle(program ? "Loudness Alarms" : "SPL Alarms");
-        auto *form = new QFormLayout(this);
+        setWindowTitle("Alarms");
+        auto *root = new QVBoxLayout(this);
+        auto *levelGroup =
+            new QGroupBox(program ? "Loudness level" : "SPL level");
+        auto *form = new QFormLayout(levelGroup);
 
         enableCheck = new QCheckBox("Color readouts when levels get high");
         enableCheck->setChecked(enabled);
@@ -531,18 +535,58 @@ public:
                   "Typical show limits: warn 95-99, alert 102-103 dBA LAeq.");
         hint->setStyleSheet("color:#8a92a6; font-size:11px;");
         form->addRow(hint);
+        root->addWidget(levelGroup);
+
+        // --- signal loss ---
+        auto *sigGroup = new QGroupBox("Signal loss");
+        auto *sigForm = new QFormLayout(sigGroup);
+        sigCheck = new QCheckBox("Warn when the input goes quiet");
+        sigCheck->setChecked(sigEnabled);
+        sigForm->addRow("Detection:", sigCheck);
+
+        sigThresholdSpin = new QDoubleSpinBox;
+        sigThresholdSpin->setRange(-90.0, -20.0);
+        sigThresholdSpin->setDecimals(0);
+        sigThresholdSpin->setSuffix(" dBFS");
+        sigThresholdSpin->setValue(sigThreshold);
+        sigThresholdSpin->setToolTip(
+            "Peak below this counts as silence. Well under the quietest\n"
+            "real programme material you expect.");
+        sigForm->addRow("Silence below:", sigThresholdSpin);
+
+        sigHoldSpin = new QDoubleSpinBox;
+        sigHoldSpin->setRange(2.0, 300.0);
+        sigHoldSpin->setDecimals(0);
+        sigHoldSpin->setSuffix(" s");
+        sigHoldSpin->setValue(sigHold);
+        sigForm->addRow("For at least:", sigHoldSpin);
+
+        auto *sigHint = new QLabel(
+            "Digital black — samples at exactly zero, i.e. the route is dead —\n"
+            "is reported separately after 1 s, since it cannot be a musical\n"
+            "pause. Keep the silence horizon generous: a gap between songs or\n"
+            "after \"let's pray\" is not a failure.\n"
+            "Reported over the API as `signal`, with an event pushed on the\n"
+            "WebSocket. No audible alert on purpose — on a stream machine the\n"
+            "system sound can land back in the capture and go out on air.");
+        sigHint->setStyleSheet("color:#8a92a6; font-size:11px;");
+        sigForm->addRow(sigHint);
+        root->addWidget(sigGroup);
 
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
                                              QDialogButtonBox::Cancel);
         connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
         connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-        form->addRow(buttons);
+        root->addWidget(buttons);
     }
 
     QCheckBox *enableCheck;
     QComboBox *metricCombo;
     QDoubleSpinBox *warnSpin;
     QDoubleSpinBox *alertSpin;
+    QCheckBox *sigCheck;
+    QDoubleSpinBox *sigThresholdSpin;
+    QDoubleSpinBox *sigHoldSpin;
 };
 
 // ---------------------------------------------------------------------------
@@ -676,6 +720,19 @@ public:
         auto *resetBtn = new QPushButton("Reset Leq/Peaks");
         ctl->addWidget(resetBtn);
         root->addLayout(ctl);
+
+        // --- signal-loss banner ---
+        // Solid, not flashing: flashing reads as decorative and is hostile to
+        // anyone light-sensitive. The running timer is the useful part —
+        // "how long has it been dead" is the operational question.
+        m_signalBanner = new QLabel;
+        m_signalBanner->setAlignment(Qt::AlignCenter);
+        m_signalBanner->setStyleSheet(
+            "background:#4a2020; color:#e05c5c; font-weight:bold; "
+            "font-size:16px; letter-spacing:1px; padding:7px; "
+            "border-radius:4px;");
+        m_signalBanner->hide();
+        root->addWidget(m_signalBanner);
 
         // --- SPL readouts (populated by rebuildReadouts from config) ---
         m_splRow = new QHBoxLayout;
@@ -1218,13 +1275,17 @@ private:
 
     void showAlarmSettings() {
         AlarmsDialog dlg(this, m_mode, m_alarmEnabled, m_alarmMetric,
-                         m_alarmWarn, m_alarmAlert);
+                         m_alarmWarn, m_alarmAlert, m_signalMon.enabled,
+                         m_signalMon.thresholdDb, m_signalMon.silenceHoldS);
         if (dlg.exec() != QDialog::Accepted)
             return;
         m_alarmEnabled = dlg.enableCheck->isChecked();
         m_alarmMetric = dlg.metricCombo->currentData().toString();
         m_alarmWarn = dlg.warnSpin->value();
         m_alarmAlert = dlg.alertSpin->value();
+        m_signalMon.enabled = dlg.sigCheck->isChecked();
+        m_signalMon.thresholdDb = dlg.sigThresholdSpin->value();
+        m_signalMon.silenceHoldS = dlg.sigHoldSpin->value();
         saveSettings();
     }
 
@@ -1475,6 +1536,10 @@ private:
         m_leqShortS = st.value("leqShortS", 60).toInt();
         m_leqLongS = st.value("leqLongS", 900).toInt();
         m_breakoutSizeIdx = std::clamp(st.value("breakoutSize", 1).toInt(), 0, 2);
+        // Signal loss is judged on the raw input, so it is mode-independent.
+        m_signalMon.enabled = st.value("signalEnabled", true).toBool();
+        m_signalMon.thresholdDb = st.value("signalThreshold", -60.0).toDouble();
+        m_signalMon.silenceHoldS = st.value("signalHoldS", 15.0).toDouble();
 
         // Program-mode delivery target. Global rather than mode-scoped: it
         // only means anything in Program mode anyway.
@@ -1620,6 +1685,9 @@ private:
         st.setValue("leqShortS", m_leqShortS);
         st.setValue("leqLongS", m_leqLongS);
         st.setValue("breakoutSize", m_breakoutSizeIdx);
+        st.setValue("signalEnabled", m_signalMon.enabled);
+        st.setValue("signalThreshold", m_signalMon.thresholdDb);
+        st.setValue("signalHoldS", m_signalMon.silenceHoldS);
         st.setValue("mode", m_mode);
         st.setValue("pairL", m_pairL);
         st.setValue("pairR", m_pairR);
@@ -1796,6 +1864,9 @@ private:
             m_analyzer.sr = m_engine.sampleRate();
             m_analyzer.resetAll();
             m_metricsEng.resetAll();
+            // A device that opens quiet should get the full horizon before it
+            // is called dead, not inherit the previous device's counters.
+            m_signalMon.reset(QDateTime::currentMSecsSinceEpoch());
             statusBar()->showMessage(
                 QString("Listening at %1 Hz, %2 ch — FFT %3 (%4 ms window)")
                     .arg(m_engine.sampleRate())
@@ -1874,9 +1945,43 @@ private:
         return ms[std::clamp(m_streamRateIdx, 0, 3)];
     }
 
+    // Solid red banner with a running timer; the API carries the same state
+    // and gets an edge event, which is what actually matters on an unattended
+    // machine where nobody is looking at this window.
+    void updateSignalUi(const SignalStatus &s, qint64 nowMs) {
+        if (s.state != m_lastSignalState) {
+            if (s.state == SignalOk) {
+                m_api->broadcastEvent(
+                    "silence_end",
+                    QJsonObject{{"silent_for_s", s.silentForS}});
+                statusBar()->showMessage("Audio restored", 6000);
+            } else {
+                m_api->broadcastEvent(
+                    "silence_start",
+                    QJsonObject{
+                        {"reason", s.state == SignalBlack ? "digital_black"
+                                                          : "below_threshold"},
+                        {"threshold_db", m_signalMon.thresholdDb},
+                        {"last_audio_ms", s.lastAudioMs}});
+            }
+            m_lastSignalState = s.state;
+        }
+        if (s.state == SignalOk) {
+            m_signalBanner->hide();
+            return;
+        }
+        const qint64 dead = s.lastAudioMs > 0 ? nowMs - s.lastAudioMs : 0;
+        m_signalBanner->setText(
+            QString("%1 — %2s")
+                .arg(s.state == SignalBlack ? "NO AUDIO (digital black)"
+                                            : "SILENT")
+                .arg(dead / 1000));
+        m_signalBanner->show();
+    }
+
     void tick() {
-        float pk = 0.0f, pkC = 0.0f;
-        const bool have = m_engine.latest(FFT_SIZE, m_samples, pk, pkC);
+        float pk = 0.0f, pkC = 0.0f, pkMon = 0.0f;
+        const bool have = m_engine.latest(FFT_SIZE, m_samples, pk, pkC, pkMon);
         if (pk >= 0.99f)
             m_clipTicks = 20;
         if (m_clipTicks > 0) {
@@ -1895,6 +2000,14 @@ private:
                 ? std::clamp((nowTick - m_lastTickMs) / 1000.0, 0.01, 0.5)
                 : UPDATE_MS / 1000.0;
         m_lastTickMs = nowTick;
+
+        // Signal presence runs before anything else: it must keep working
+        // when every other metric has bottomed out, which is exactly the
+        // situation it exists to report.
+        m_signalMon.push(pkMon, dt, nowTick);
+        const SignalStatus sig = m_signalMon.status();
+        updateSignalUi(sig, nowTick);
+
         AnalyzerResult res = m_analyzer.process(m_samples, dt, rtaTau(),
                                                 m_peakCheck->isChecked());
         m_lastSlowDbfs = res.slow;
@@ -1973,6 +2086,13 @@ private:
         snap.peaks = res.peaks;
         snap.micCorr = m_micCorrName;
         snap.mode = program ? "program" : "acoustic";
+        snap.signalState = sig.state == SignalBlack   ? "black"
+                           : sig.state == SignalSilent ? "silent"
+                                                       : "ok";
+        snap.silentForS = sig.silentForS;
+        snap.lastAudioMs = sig.lastAudioMs;
+        snap.signalEnabled = m_signalMon.enabled;
+        snap.signalThresholdDb = m_signalMon.thresholdDb;
         snap.targetLufs = program ? m_targetLufs : kNaN;
         snap.ceilDbtp = program ? m_ceilDbtp : kNaN;
         snap.metrics.clear();
@@ -2017,6 +2137,9 @@ private:
     double m_targetLufs = -14.0;
     double m_ceilDbtp = -1.0;
     QStringList m_logIds;              // CSV columns, frozen at log start
+    SignalMonitor m_signalMon;
+    int m_lastSignalState = SignalOk;  // for edge-triggered API events
+    QLabel *m_signalBanner = nullptr;
     QStringList m_mainMetrics;
     QStringList m_breakoutMetrics;
     int m_leqShortS = 60;
@@ -2230,6 +2353,75 @@ static bool loudnessSelftest() {
     return ok;
 }
 
+// Signal-loss detection: the two triggers must fire on their own horizons and
+// neither may fire on quiet-but-present programme material.
+static bool signalSelftest() {
+    bool ok = true;
+    const double dt = UPDATE_MS / 1000.0;
+    qint64 t = 0;
+    auto feed = [&](SignalMonitor &m, double peak, double seconds) {
+        for (int i = 0; i < int(seconds / dt); ++i) {
+            t += UPDATE_MS;
+            m.push(peak, dt, t);
+        }
+    };
+
+    // Digital black fires on its short horizon, well before the silence one.
+    SignalMonitor black;
+    black.reset(t);
+    feed(black, 0.0, 0.5);
+    const int early = black.status().state;
+    feed(black, 0.0, 1.0);
+    const int late = black.status().state;
+    std::printf("signal: digital black after 0.5 s = %d (expected 0), "
+                "after 1.5 s = %d (expected 2)\n",
+                early, late);
+    ok = ok && early == SignalOk && late == SignalBlack;
+
+    // Audio clears it, and the quiet run resets.
+    feed(black, 0.5, 0.5);
+    SignalStatus s = black.status();
+    std::printf("signal: after audio returns state = %d (expected 0), "
+                "silent_for = %.2f s (expected 0.00)\n",
+                s.state, s.silentForS);
+    ok = ok && s.state == SignalOk && s.silentForS < 0.01;
+
+    // Low-level silence waits for the long horizon — a pause is not a fault.
+    SignalMonitor quiet;
+    quiet.silenceHoldS = 15.0;
+    quiet.reset(t);
+    const double belowFloor = std::pow(10.0, -70.0 / 20.0);
+    feed(quiet, belowFloor, 10.0);
+    const int mid = quiet.status().state;
+    feed(quiet, belowFloor, 6.0);
+    const int fired = quiet.status().state;
+    std::printf("signal: -70 dBFS after 10 s = %d (expected 0), "
+                "after 16 s = %d (expected 1)\n",
+                mid, fired);
+    ok = ok && mid == SignalOk && fired == SignalSilent;
+
+    // Quiet but present programme material must never trip it.
+    SignalMonitor present;
+    present.reset(t);
+    feed(present, std::pow(10.0, -40.0 / 20.0), 120.0);
+    s = present.status();
+    std::printf("signal: -40 dBFS for 2 min state = %d (expected 0)\n",
+                s.state);
+    ok = ok && s.state == SignalOk;
+
+    // Disabled means silent, not blind: the counters still run.
+    SignalMonitor off;
+    off.enabled = false;
+    off.reset(t);
+    feed(off, 0.0, 30.0);
+    s = off.status();
+    std::printf("signal: disabled after 30 s of black state = %d (expected 0), "
+                "silent_for = %.0f s (expected 30)\n",
+                s.state, s.silentForS);
+    ok = ok && s.state == SignalOk && std::fabs(s.silentForS - 30.0) < 0.2;
+    return ok;
+}
+
 static int selftest() {
     Analyzer an;
     an.sr = 48000;
@@ -2302,6 +2494,7 @@ static int selftest() {
 
     ok = metricsSelftest() && ok;
     ok = loudnessSelftest() && ok;
+    ok = signalSelftest() && ok;
 
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
