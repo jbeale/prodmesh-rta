@@ -1,12 +1,13 @@
 # Program mode — design plan and roadmap (v0.7.0 → v0.9.0)
 
-Status: **v0.7.0 shipped** (tagged, signed and notarised). v0.8.0 not started.
+Status: **v0.7.0 and v0.8.0 shipped** (tagged, signed and notarised).
 
 Roadmap at a glance:
 
 - **v0.7.0** — Acoustic/Program modes, BS.1770 loudness, true peak. *Done.*
-- **v0.8.0** — silence/dropout detection, stereo tools, LRA and QC logging.
+- **v0.8.0** — silence/dropout detection, stereo tools, LRA, QC logging. *Done.*
 - **v0.9.0** — per-device "will this survive the listener's playback" status.
+  Every input it needs now exists.
 - *Separate package* — `prodmesh-rta-capture`, the VST3/AU insert plugin.
 
 ## Why
@@ -210,7 +211,7 @@ in the capture path and go out over the broadcast.
 
 Applies to both modes — a dead mic matters in Acoustic too.
 
-## 2. Stereo tab (Program mode only)
+## 2. Stereo tab (Program mode only) — **implemented**
 
 Ranked by what they actually catch:
 
@@ -228,7 +229,7 @@ Ranked by what they actually catch:
 6. Mid/Side RTA — deliberately deferred; easy to clutter the RTA for
    marginal gain.
 
-## 3. Remaining QC
+## 3. Remaining QC — **implemented**
 
 - **True-peak over-count log** — timestamped events above the ceiling, so
   there is a QC record after the service.

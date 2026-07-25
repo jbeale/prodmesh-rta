@@ -26,6 +26,12 @@ The C++ version additionally has:
   presets for YouTube/Spotify/Twitch, Apple Podcasts, EBU R128 and ATSC A/85
 - **Loudness meter** — big gated Integrated readout, M/S bars on a
   target-centred scale, shaded target zone, and true-peak over-counting
+- **Stereo scope** (Program mode) — goniometer with phosphor persistence,
+  phase correlation, L/R balance, and a **mono-compatibility** figure in LU:
+  the polarity-flipped channel that sounds fine on monitors and vanishes for
+  every phone and TV listener is the failure this catches
+- **Loudness range (LRA)** and a timestamped **true-peak overshoot log**, so
+  there is a QC record after the service rather than just a count
 - **Spectrogram** — scrolling log-frequency heat map (tab next to RTA)
   with selectable color themes, range, sensitivity, and time span
   (10 s – 10 min), plus a hover frequency cursor
@@ -205,9 +211,37 @@ swaps the exposure metrics for EBU R128 loudness:
 | `dbtp` | True peak over the last 400 ms, 4× oversampled |
 | `dbtpMax` | True-peak maximum since the last Reset |
 | `plr` | Peak-to-loudness ratio (`dbtpMax` − `lufsI`) |
+| `lra` | Loudness range (EBU Tech 3342), 10th–95th percentile spread in LU |
+| `monoDelta` | LU lost when the pair is summed to mono |
+| `corr` | Stereo correlation, −1 (inverted) … +1 (mono) |
+| `balance` | R − L level difference, dB |
+| `dbtpL` / `dbtpR` | Per-channel true-peak maximum |
 
-Integrated loudness and the true-peak maximum are **session** metrics, so hit
-**Reset Leq/Peaks** when the stream starts. Loudness is the BS.1770 sum of the
+### Reading the stereo metrics
+
+The **Stereo** tab shows a goniometer (the pair rotated 45°, mid vertical) with
+correlation, balance and mono loss beside it. What the shapes mean:
+
+- **vertical line** — mono; **round/rosette cloud** — very wide stereo
+- **horizontal line** — a channel is polarity-flipped. This sounds fine on
+  monitors and *cancels* for anyone listening in mono, which is phone speakers
+  and most TVs — i.e. most of a livestream audience.
+
+**`monoDelta` is the number to act on**, because it is in the same units as the
+delivery target. Some loss is physics, not a fault: fully decorrelated stereo
+loses exactly 3 LU when summed, so anything down to about −3 LU is normal.
+Past −6 LU something in the mix is cancelling itself.
+
+Correlation dithering around 0 on wide material is likewise normal — only a
+*sustained* negative reading indicates a polarity problem.
+
+`lra` needs at least 10 s of short-term data before it reports anything; below
+that a range figure would be noise dressed as a statistic. Typical values:
+3–5 LU for a heavily limited pop master, 6–12 LU for a service mix with room
+to breathe.
+
+Integrated loudness, LRA and the true-peak maximum are **session** metrics, so
+hit **Reset Leq/Peaks** when the stream starts. Loudness is the BS.1770 sum of the
 stereo pair chosen in the dialog; the RTA keeps following the **Ch** selector.
 
 The app captures from *input* devices, so the programme bus has to reach it as
@@ -298,7 +332,8 @@ networks never see HTTP traffic. All endpoints are read-only GETs returning JSON
 | `/api/status` | sample rate, weighting, cal, uptime, history length |
 | `/api/spl` | current `fast_db`, `slow_db`, `leq_db` + `metrics` + `alarm` |
 | `/api/rta` | `centers_hz` + `bands_db` (31 values) + `peaks_db` + `metrics` |
-| `/api/history?since_ms=&limit=` | 1 Hz SPL samples, up to 6 hours |
+| `/api/history?since_ms=&limit=` | 1 Hz level samples, up to 6 hours |
+| `/api/overs` | timestamped true-peak overshoots this session |
 | `ws://…/api/stream` | WebSocket: pushes SPL + bands at the configured rate |
 
 `metrics` maps metric ids to values; `alarm` reports the watched metric,
