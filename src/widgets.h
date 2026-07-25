@@ -1253,8 +1253,14 @@ private:
     static constexpr int kImg = 360;
     static constexpr double kInvSqrt2 = 0.70710678118654752;
 
-    static const char *corrColor(double c) {
-        return c < 0.0 ? "#e05c5c" : c < 0.3 ? "#e8c84b" : "#2fbf9b";
+    // Correlation dithering around zero is normal for very wide material, so
+    // red is reserved for *sustained* negative — an instantaneous sign test
+    // flashes alarm at -0.001 and calls +0.001 fine, which is noise, not
+    // information. Amber below 0.3 still says "this thins in mono".
+    const char *corrColor(double c) const {
+        if (m_negS > 2.0)
+            return "#e05c5c";
+        return c < 0.3 ? "#e8c84b" : "#2fbf9b";
     }
 
     void drawReadouts(QPainter &qp, int x, int y, int w, const QFont &capF,
@@ -1322,9 +1328,16 @@ private:
         if (m_negS > 2.0)
             return QString("CORRELATION %1 — check channel polarity")
                 .arg(m_corr, 0, 'f', 2);
+        // Quote the real mono figure rather than guessing at a consequence:
+        // fully decorrelated stereo losing ~3 LU is physics, not a fault.
         if (m_corr < 0.3)
-            return QString("correlation %1 — thin when summed to mono")
-                .arg(m_corr, 0, 'f', 2);
+            return std::isfinite(m_monoDelta)
+                       ? QString("correlation %1 — very wide, %2 LU lost in "
+                                 "mono")
+                             .arg(m_corr, 0, 'f', 2)
+                             .arg(m_monoDelta, 0, 'f', 1)
+                       : QString("correlation %1 — very wide")
+                             .arg(m_corr, 0, 'f', 2);
         return QString("correlation %1").arg(m_corr, 0, 'f', 2);
     }
 
