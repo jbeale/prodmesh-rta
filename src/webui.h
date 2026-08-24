@@ -8,7 +8,7 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ProdMesh Remote RTA</title>
+<title>ProdMesh RTA</title>
 <style>
   :root {
     --bg: #14161c; --panel: #20242e; --border: #2a2f3d; --grid: #2a2e39;
@@ -89,7 +89,7 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>ProdMesh Remote RTA</h1>
+  <h1>ProdMesh RTA</h1>
   <span id="status" class="down">connecting…</span>
   <span id="modeinfo"></span>
 </header>
@@ -106,7 +106,7 @@ inline const char *kDashboardHtml = R"HTML(<!DOCTYPE html>
   <div class="cap" id="rtacap">RTA — 1/3 OCTAVE</div>
   <canvas id="rta"></canvas>
 </div>
-<footer>Served by ProdMesh Remote RTA — levels update live over WebSocket.</footer>
+<footer>Served by ProdMesh RTA — levels update live over WebSocket.</footer>
 <script>
 "use strict";
 // Tile sets per measurement mode. The app reports which one it is in, so the

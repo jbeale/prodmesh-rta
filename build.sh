@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds ProdMesh Remote RTA on macOS. One-time: chmod +x build.sh
+# Builds ProdMesh RTA on macOS. One-time: chmod +x build.sh
 # Installs qt/cmake/ninja via Homebrew if they are missing.
 set -e
 cd "$(dirname "$0")"

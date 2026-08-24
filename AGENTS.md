@@ -1,4 +1,4 @@
-# ProdMesh Remote RTA — contributor / agent guide
+# ProdMesh RTA — contributor / agent guide
 
 A Qt 6 C++ SPL meter + 1/3-octave RTA for live sound (Windows/macOS), with a
 spectrogram, Smaart-style SPL metrics, an HTTP/WebSocket API, and a built-in

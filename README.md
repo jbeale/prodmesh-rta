@@ -1,4 +1,4 @@
-# ProdMesh Remote RTA
+# ProdMesh RTA
 
 [![build](https://github.com/jbeale/prodmesh-rta/actions/workflows/build.yml/badge.svg)](https://github.com/jbeale/prodmesh-rta/actions/workflows/build.yml)
 

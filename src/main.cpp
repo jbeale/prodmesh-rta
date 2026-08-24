@@ -1,4 +1,4 @@
-// ProdMesh Remote RTA — a minimal cross-platform (Windows/macOS) SPL meter
+// ProdMesh RTA — a minimal cross-platform (Windows/macOS) SPL meter
 // and 1/3-octave real-time analyzer with spectrogram, SPL history, and an
 // HTTP/WebSocket API for remote monitoring (e.g. by ProdMesh).
 //
@@ -57,7 +57,7 @@
 #define APP_VERSION "dev"
 #endif
 
-static const char *APP_NAME = "ProdMesh Remote RTA";
+static const char *APP_NAME = "ProdMesh RTA";
 
 // Application-wide dark theme (on the Fusion style) — one place instead of
 // scattered per-widget stylesheets so dialogs and menus stay consistent.
@@ -2900,7 +2900,7 @@ int main(int argc, char *argv[]) {
     pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#5a6172"));
     app.setPalette(pal);
     app.setStyleSheet(APP_STYLE);
-    app.setApplicationName("ProdMesh Remote RTA");
+    app.setApplicationName("ProdMesh RTA");
     app.setOrganizationName("ProdMesh");
     app.setApplicationVersion(APP_VERSION);
 #ifndef Q_OS_MACOS

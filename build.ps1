@@ -1,4 +1,4 @@
-# Builds ProdMesh Remote RTA on Windows using the Qt online-installer layout
+# Builds ProdMesh RTA on Windows using the Qt online-installer layout
 # (C:\Qt\<version>\mingw_64 + C:\Qt\Tools). Run via build.bat or:
 #   powershell -ExecutionPolicy Bypass -File build.ps1
 $ErrorActionPreference = "Stop"
