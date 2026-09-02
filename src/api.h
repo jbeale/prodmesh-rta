@@ -52,6 +52,9 @@ public:
         QString weighting = "A";
         double cal = 100.0;
         double fast = kNaN, slow = kNaN, leq = kNaN;  // dB SPL (cal applied)
+        // All simultaneous curves. The scalar fields above remain the local
+        // display selection for legacy clients.
+        WeightingValues fastByWeight, slowByWeight, leqByWeight;
         std::vector<double> bands;                    // dB SPL
         std::vector<double> peaks;                    // empty if peak hold off
         QString micCorr;                              // cal file name, or empty
@@ -90,6 +93,7 @@ public:
         qint64 t = 0;
         double fast = kNaN, slow = kNaN, leq = kNaN;  // dB SPL
         double ca = kNaN;  // C-A ratio (LF-energy trend over time)
+        WeightingValues fastByWeight, slowByWeight, leqByWeight;
     };
 
     explicit ApiServer(QObject *parent = nullptr) : QObject(parent) {
@@ -178,6 +182,15 @@ private:
             a.append(jnum(x));
         return a;
     }
+    static QJsonObject weightingsJson(const WeightingValues &v) {
+        return QJsonObject{{"a", jnum(v.a)}, {"b", jnum(v.b)},
+                           {"c", jnum(v.c)}, {"z", jnum(v.z)}};
+    }
+    QJsonObject splJson() const {
+        return QJsonObject{{"fast_db", weightingsJson(m_snap.fastByWeight)},
+                           {"slow_db", weightingsJson(m_snap.slowByWeight)},
+                           {"leq_db", weightingsJson(m_snap.leqByWeight)}};
+    }
 
     QJsonObject levelsJson() const {
         QJsonArray centers;
@@ -192,6 +205,7 @@ private:
             {"fast_db", jnum(m_snap.fast)},
             {"slow_db", jnum(m_snap.slow)},
             {"leq_db", jnum(m_snap.leq)},
+            {"spl", splJson()},
             {"centers_hz", centers},
             {"bands_db", jarr(m_snap.bands)},
         };
@@ -414,6 +428,7 @@ private:
                 {"dashboard", "/"},
                 {"endpoints",
                  QJsonArray{"/api/status", "/api/spl", "/api/rta",
+                            "/api/info",
                             "/api/history?since_ms=&limit=",
                             "ws: /api/stream"}},
             });
@@ -428,6 +443,8 @@ private:
                                       ? QJsonValue("mix")
                                       : QJsonValue(m_snap.channel + 1)},
                 {"weighting", m_snap.weighting},
+                {"spl_weightings", QJsonArray{"A", "B", "C", "Z"}},
+                {"spl", splJson()},
                 {"cal_db", m_snap.cal},
                 {"fft_size", FFT_SIZE},
                 {"update_ms", UPDATE_MS},
@@ -450,6 +467,7 @@ private:
                 {"fast_db", jnum(m_snap.fast)},
                 {"slow_db", jnum(m_snap.slow)},
                 {"leq_db", jnum(m_snap.leq)},
+                {"spl", splJson()},
                 {"metrics", metricsJson()},
                 {"alarm", alarmJson()},
                 {"signal", signalJson()},
@@ -463,6 +481,18 @@ private:
             QJsonObject o = levelsJson();
             o.remove("type");
             return QJsonDocument(o);
+        }
+        if (path == "/api/info") {
+            return QJsonDocument(QJsonObject{
+                {"app", "prodmesh-remote-rta"},
+                {"api_version", 2},
+                {"spl_weightings", QJsonArray{"A", "B", "C", "Z"}},
+                {"spl_schema", QJsonObject{
+                    {"field", "spl"},
+                    {"time_weightings", QJsonArray{"fast_db", "slow_db", "leq_db"}},
+                    {"curves", QJsonArray{"a", "b", "c", "z"}},
+                }},
+            });
         }
         if (path == "/api/overs") {
             QJsonArray a;
@@ -491,6 +521,11 @@ private:
                     {"slow_db", jnum(it->slow)},
                     {"leq_db", jnum(it->leq)},
                     {"ca_db", jnum(it->ca)},
+                    {"spl", QJsonObject{
+                        {"fast_db", weightingsJson(it->fastByWeight)},
+                        {"slow_db", weightingsJson(it->slowByWeight)},
+                        {"leq_db", weightingsJson(it->leqByWeight)},
+                    }},
                 });
             }
             // The three series follow the mode: Fast / Slow / Leq in dB SPL

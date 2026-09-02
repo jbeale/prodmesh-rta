@@ -973,7 +973,7 @@ public:
                          [this](const QString &w) {
                              m_analyzer.weighting =
                                  w.isEmpty() ? 'Z' : w[0].toLatin1();
-                             m_analyzer.resetAll();
+                             m_analyzer.resetDisplay();
                              saveSettings();
                          });
         QObject::connect(m_avgCombo, &QComboBox::currentIndexChanged, this,
@@ -2179,6 +2179,13 @@ private:
         snap.fast = res.fast + cal;
         snap.slow = res.slow + cal;
         snap.leq = res.leq + cal;
+        auto withCal = [cal](const WeightingValues &v) {
+            return WeightingValues{v.a + cal, v.b + cal,
+                                   v.c + cal, v.z + cal};
+        };
+        snap.fastByWeight = withCal(res.fastByWeight);
+        snap.slowByWeight = withCal(res.slowByWeight);
+        snap.leqByWeight = withCal(res.leqByWeight);
         snap.bands = res.bands;
         snap.peaks = res.peaks;
         snap.micCorr = m_micCorrName;
@@ -2222,7 +2229,10 @@ private:
                                                 m_loudVals.range}
                         : ApiServer::HistSample{now, res.fast + cal,
                                                 res.slow + cal,
-                                                res.leq + cal, mv.ca});
+                                                res.leq + cal, mv.ca,
+                                                withCal(res.fastByWeight),
+                                                withCal(res.slowByWeight),
+                                                withCal(res.leqByWeight)});
         }
         // -UPDATE_MS/2: the check runs on the tick grid, so without slack a
         // 100 ms interval lands on alternating 100/150 ms ticks (~8 Hz).
@@ -2695,6 +2705,32 @@ static int selftest() {
     ok = ok && std::fabs(bWeightDb(100.0) + 5.6) < 0.1 &&
          std::fabs(bWeightDb(1000.0)) < 0.1 &&
          std::fabs(bWeightDb(10000.0) + 4.3) < 0.1;
+
+    // All four curves are accumulated concurrently, independent of the
+    // local display choice. A 100 Hz tone makes their separation obvious.
+    Analyzer low;
+    low.sr = 48000;
+    std::vector<float> lowTone(FFT_SIZE);
+    for (int i = 0; i < FFT_SIZE; ++i)
+        lowTone[i] = float(std::sin(2.0 * kPi * 100.0 * i / low.sr));
+    AnalyzerResult lowRes;
+    low.weighting = 'A';
+    for (int i = 0; i < 100; ++i)
+        lowRes = low.process(lowTone, 0.05, 0.125, false);
+    const WeightingValues beforeSwitch = lowRes.fastByWeight;
+    low.weighting = 'Z';
+    lowRes = low.process(lowTone, 0.05, 0.125, false);
+    std::printf("all curves @100 Hz: A %.2f, B %.2f, C %.2f, Z %.2f dBFS\n",
+                lowRes.fastByWeight.a, lowRes.fastByWeight.b,
+                lowRes.fastByWeight.c, lowRes.fastByWeight.z);
+    ok = ok && std::fabs(lowRes.fastByWeight.a - lowRes.fastByWeight.z -
+                         aWeightDb(100.0)) < 0.15 &&
+         std::fabs(lowRes.fastByWeight.b - lowRes.fastByWeight.z -
+                         bWeightDb(100.0)) < 0.15 &&
+         std::fabs(lowRes.fastByWeight.c - lowRes.fastByWeight.z -
+                         cWeightDb(100.0)) < 0.15 &&
+         std::fabs(lowRes.fastByWeight.b - beforeSwitch.b) < 0.01 &&
+         std::fabs(lowRes.fast - lowRes.fastByWeight.z) < 1e-9;
 
     // Time-domain C-weighting filter: unity gain at 1 kHz.
     CWeightFilter cw;
