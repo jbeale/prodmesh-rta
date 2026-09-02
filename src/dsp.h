@@ -40,6 +40,18 @@ inline double aWeightDb(double f) {
     return 20.0 * std::log10(num / den) + 2.00;
 }
 
+// IEC 61672 B-weighting.  B is retained for compatibility with legacy SPL
+// specifications: it rolls off low frequencies less aggressively than A.
+inline double bWeightDb(double f) {
+    f = std::max(f, 1e-6);
+    const double f2 = f * f;
+    const double num = (12194.0 * 12194.0) * f2 * std::sqrt(f2);
+    const double den = (f2 + 20.6 * 20.6)
+                       * std::sqrt(f2 + 158.5 * 158.5)
+                       * (f2 + 12194.0 * 12194.0);
+    return 20.0 * std::log10(num / den) + 0.17;
+}
+
 inline double cWeightDb(double f) {
     f = std::max(f, 1e-6);
     const double f2 = f * f;
@@ -286,7 +298,7 @@ struct AnalyzerResult {
     double leq = kNaN;
     // Broadband mean-square power (linear, dBFS domain) under each standard
     // weighting, independent of the display weighting — for derived metrics.
-    double powA = 0.0, powC = 0.0, powZ = 0.0;
+    double powA = 0.0, powB = 0.0, powC = 0.0, powZ = 0.0;
     std::vector<double> bands;
     std::vector<double> peaks;  // empty when peak hold is off
     std::vector<double> hires;  // 1/24-octave spectrum in dB, for the line view
@@ -297,7 +309,7 @@ struct AnalyzerResult {
 class Analyzer {
 public:
     int sr = 48000;
-    char weighting = 'A';  // 'A', 'C' or 'Z'
+    char weighting = 'A';  // 'A', 'B', 'C' or 'Z'
 
     Analyzer() {
         m_window.resize(FFT_SIZE);
@@ -349,7 +361,9 @@ public:
         fft(m_fftBuf);
         const int nBins = FFT_SIZE / 2 + 1;
         const std::vector<double> *sel =
-            weighting == 'A' ? &m_wA : weighting == 'C' ? &m_wC : nullptr;
+            weighting == 'A' ? &m_wA
+            : weighting == 'B' ? &m_wB
+            : weighting == 'C' ? &m_wC : nullptr;
         for (int k = 0; k < nBins; ++k) {
             double p = std::norm(m_fftBuf[k]);
             if (k != 0 && k != FFT_SIZE / 2)
@@ -359,15 +373,18 @@ public:
             m_power[k] = sel ? pz * (*sel)[k] : pz;  // display weighting
         }
 
-        // Broadband SPL (20 Hz - 20 kHz) under all three weightings;
+        // Broadband SPL (20 Hz - 20 kHz) under all standard weightings;
         // exponential time weighting on power for the displayed one.
-        double PA = 0.0, PC = 0.0, PZ = 0.0;
+        double PA = 0.0, PB = 0.0, PC = 0.0, PZ = 0.0;
         for (int k = m_splLo; k <= m_splHi; ++k) {
             PA += m_powerZ[k] * m_wA[k];
+            PB += m_powerZ[k] * m_wB[k];
             PC += m_powerZ[k] * m_wC[k];
             PZ += m_powerZ[k];
         }
-        const double P = weighting == 'A' ? PA : weighting == 'C' ? PC : PZ;
+        const double P = weighting == 'A' ? PA
+                         : weighting == 'B' ? PB
+                         : weighting == 'C' ? PC : PZ;
         const double aFast = std::exp(-dt / 0.125);
         const double aSlow = std::exp(-dt / 1.0);
         m_fastP = m_hasFast ? aFast * m_fastP + (1 - aFast) * P : P;
@@ -419,6 +436,7 @@ public:
         res.slow = toDb(m_slowP);
         res.leq = toDb(m_leqSum / std::max<qint64>(m_leqN, 1));
         res.powA = PA;
+        res.powB = PB;
         res.powC = PC;
         res.powZ = PZ;
         res.bands.resize(NUM_BANDS);
@@ -464,11 +482,13 @@ private:
         m_power.resize(nBins);
         m_powerZ.resize(nBins);
         m_wA.resize(nBins);
+        m_wB.resize(nBins);
         m_wC.resize(nBins);
         m_micLin.resize(nBins);
         for (int k = 0; k < nBins; ++k) {
             const double f = k * df;
             m_wA[k] = std::pow(10.0, aWeightDb(f) / 10.0);
+            m_wB[k] = std::pow(10.0, bWeightDb(f) / 10.0);
             m_wC[k] = std::pow(10.0, cWeightDb(f) / 10.0);
             m_micLin[k] =
                 m_micCorr.empty()
@@ -538,7 +558,7 @@ private:
     std::vector<std::complex<double>> m_fftBuf;
     std::vector<double> m_power;
     std::vector<double> m_powerZ;
-    std::vector<double> m_wA, m_wC;
+    std::vector<double> m_wA, m_wB, m_wC;
     std::vector<double> m_micLin;
     std::vector<Band> m_bands;
     std::vector<Band> m_hires;
