@@ -187,10 +187,11 @@ output only appears when redirected:
   default). **Mix** averages all channels; note that unused channels then
   dilute the level (a mic alone on one of 8 inputs reads ~9 dB low per
   doubling). Reported as `input_channel` in `/api/status`.
-- **Weighting** — A (default, matches most SPL specs), B (legacy/reference
-  compatibility), C, or Z (flat). Applies to both the SPL readouts and RTA
-  display; the readout labels follow (LAF/LBF/LCF/LZF, etc.). CSV rows and API
-  payloads include the active weighting so recorded readings remain clear.
+- **Weighting** — A (default, matches most SPL specs), B (IEC 60651, for
+  legacy specs and reference data), C, or Z (flat). Applies to both the SPL
+  readouts and the RTA display; the readout labels follow (LAF/LBF/LCF/LZF,
+  etc.). Each CSV log row ends with the active weighting, and the API reports
+  it as `weighting`, so recorded readings stay unambiguous.
 - **RTA avg** — smoothing for the spectrum bars. **Peak hold** overlays a
   slowly decaying max line per band.
 - **Reset Leq/Peaks** — restarts the Leq average and clears peak hold.

@@ -40,8 +40,9 @@ inline double aWeightDb(double f) {
     return 20.0 * std::log10(num / den) + 2.00;
 }
 
-// IEC 61672 B-weighting.  B is retained for compatibility with legacy SPL
-// specifications: it rolls off low frequencies less aggressively than A.
+// B-weighting per IEC 60651 (it was dropped from IEC 61672, which kept
+// only A, C and Z).  Retained for legacy SPL specifications and reference
+// data: it rolls off low frequencies less aggressively than A.
 inline double bWeightDb(double f) {
     f = std::max(f, 1e-6);
     const double f2 = f * f;

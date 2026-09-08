@@ -1344,11 +1344,14 @@ private:
         for (const MetricInfo &mi : kMetricInfos)
             if (metricInMode(mi, m_mode))
                 m_logIds << mi.id;
-        // Weighting is recorded per row because it may be changed while a
-        // log is active; otherwise the numeric SPL columns are ambiguous.
-        QStringList head{"time", "weighting"};
+        QStringList head{"time"};
         head << m_logIds;
         head << "alarm";
+        // Weighting is recorded per row because it may be changed while a
+        // log is active; otherwise the numeric SPL columns are ambiguous.
+        // Appended last so files written by earlier versions and the
+        // parsers built for them keep the same column offsets.
+        head << "weighting";
         m_logFile.write(head.join(',').toUtf8() + "\n");
         m_lastLogMs = 0;
         m_logAct->setText(QString("Stop SPL &Log (%1)")
@@ -1375,12 +1378,12 @@ private:
         m_lastLogMs = now;
         QStringList row{QDateTime::fromMSecsSinceEpoch(now).toString(
             Qt::ISODateWithMs)};
-        row << m_weightCombo->currentText();
         for (const QString &id : m_logIds) {
             const double v = metricValue(id, mv);
             row << (std::isfinite(v) ? QString::number(v, 'f', 2) : QString());
         }
         row << QString::number(alarmState);
+        row << m_weightCombo->currentText();
         m_logFile.write(row.join(',').toUtf8() + "\n");
         if (now - m_lastLogFlush >= 10000) {  // survive crashes/power loss
             m_lastLogFlush = now;
@@ -1467,15 +1470,8 @@ private:
         return kNaN;
     }
 
-    QString metricSuffix(const QString &id) const {
-        if (id == "doseN" || id == "doseO")
-            return "%";
-        // Put the selected curve beside the main numeric SPL values, rather
-        // than relying on the compact LAF/LBF/etc. caption above them.
-        if (id == "laf" || id == "las" || id == "leq")
-            return m_mode == ModeProgram ? "dBFS"
-                                         : "dB" + m_weightCombo->currentText();
-        return {};
+    static QString metricSuffix(const QString &id) {
+        return (id == "doseN" || id == "doseO") ? QString("%") : QString();
     }
 
     std::vector<MetricDisplay> buildDisplays(const QStringList &ids,
@@ -2687,7 +2683,7 @@ static int selftest() {
          std::fabs(toDb(res.powB) + 3.01) < 0.3 &&
          std::fabs(toDb(res.powZ) + 3.01) < 0.3;
 
-    // IEC 61672 B-weighting reference values, rounded to 0.1 dB in the
+    // IEC 60651 B-weighting reference values, rounded to 0.1 dB in the
     // published table.  These catch both the 158.5 Hz pole and normalisation.
     std::printf("B-weight: 100 Hz = %.2f dB (ref -5.6), 1 kHz = %.2f dB "
                 "(ref 0.0), 10 kHz = %.2f dB (ref -4.3)\n",
