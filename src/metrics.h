@@ -27,6 +27,9 @@ struct LoudnessValues {
 
 struct MetricValues {
     double laf = kNaN, las = kNaN, leq = kNaN;  // filled by the caller
+    // The same three under every curve at once, independent of the display
+    // selector (also filled by the caller). dB SPL, acoustic mode.
+    WeightingValues fastW, slowW, leqW;
     double leqShort = kNaN;                     // rolling LAeq, short window
     double leqLong = kNaN;                      // rolling LAeq, long window
     double lzpk = kNaN, lcpk = kNaN;            // this tick's peaks, dB SPL

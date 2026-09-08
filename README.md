@@ -286,6 +286,7 @@ the breakout window. Ids (as used in the CSV log and API):
 |---|---|
 | `laf` / `las` | Fast (125 ms) / Slow (1 s) level, displayed weighting |
 | `leq` | Leq since the last Reset |
+| `laf_a` … `leq_z` | the same three under a fixed curve (`_a`/`_b`/`_c`/`_z`), independent of the selector — e.g. `las_c` is LCS |
 | `leqS` / `leqL` | rolling LAeq over the short/long window (configurable, 10 s – 1 h) |
 | `lzpk` / `lcpk` | unweighted / C-weighted peak (time-domain C filter) |
 | `ca` | C-A ratio over the short window (low-frequency energy indicator) |

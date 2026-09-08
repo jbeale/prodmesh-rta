@@ -34,6 +34,8 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScreen>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -137,6 +139,21 @@ static const MetricInfo kMetricInfos[] = {
     {"l90", "L90 — session", kAcousticOnly},
     {"doseN", "Dose (NIOSH 85/3)", kAcousticOnly},
     {"doseO", "Dose (OSHA 90/5)", kAcousticOnly},
+    // Fixed-curve levels: "<base>_<curve>". Unlike laf/las/leq above they do
+    // not follow the Weighting selector, so two tiles can show dBA and dBC
+    // side by side. Appended last to keep the CSV columns of older logs.
+    {"laf_a", "LAF — Fast, A-weighted", kAcousticOnly},
+    {"laf_b", "LBF — Fast, B-weighted", kAcousticOnly},
+    {"laf_c", "LCF — Fast, C-weighted", kAcousticOnly},
+    {"laf_z", "LZF — Fast, unweighted", kAcousticOnly},
+    {"las_a", "LAS — Slow, A-weighted", kAcousticOnly},
+    {"las_b", "LBS — Slow, B-weighted", kAcousticOnly},
+    {"las_c", "LCS — Slow, C-weighted", kAcousticOnly},
+    {"las_z", "LZS — Slow, unweighted", kAcousticOnly},
+    {"leq_a", "LAeq — session, A-weighted", kAcousticOnly},
+    {"leq_b", "LBeq — session, B-weighted", kAcousticOnly},
+    {"leq_c", "LCeq — session, C-weighted", kAcousticOnly},
+    {"leq_z", "LZeq — session, unweighted", kAcousticOnly},
     {"lufsM", "Momentary loudness (400 ms)", kProgramOnly},
     {"lufsS", "Short-term loudness (3 s)", kProgramOnly},
     {"lufsI", "Integrated loudness (gated)", kProgramOnly},
@@ -155,6 +172,21 @@ static const MetricInfo kMetricInfos[] = {
 static bool metricInMode(const MetricInfo &mi, int mode) {
     return (mi.modes &
             (mode == ModeProgram ? kProgramOnly : kAcousticOnly)) != 0;
+}
+
+// Splits a fixed-curve id ("las_c") into its base ("las") and curve ('C').
+// Returns 0 for every other id.
+static char metricCurve(const QString &id, QString *base = nullptr) {
+    if (id.size() != 5 || id[3] != '_')
+        return 0;
+    const QString b = id.left(3);
+    const char c = id[4].toUpper().toLatin1();
+    if ((b != "laf" && b != "las" && b != "leq") ||
+        (c != 'A' && c != 'B' && c != 'C' && c != 'Z'))
+        return 0;
+    if (base)
+        *base = b;
+    return c;
 }
 
 // Delivery targets. Streaming platforms normalise *down* to their target, so
@@ -341,9 +373,17 @@ public:
         grid->addWidget(new QLabel("<b>Breakout</b>"), 0, 2);
         grid->addWidget(new QLabel("<b>Target range</b>"), 0, 3);
         int row = 1;
+        bool curveHeader = false;
         for (const MetricInfo &mi : kMetricInfos) {
             if (!metricInMode(mi, mode))
                 continue;
+            if (!curveHeader && metricCurve(mi.id)) {
+                curveHeader = true;
+                auto *h = new QLabel("<b>Fixed-curve levels</b> — do not "
+                                     "follow the Weighting selector");
+                grid->addWidget(h, row, 0, 1, 4);
+                ++row;
+            }
             grid->addWidget(new QLabel(mi.name), row, 0);
             auto *cm = new QCheckBox;
             cm->setChecked(mainIds.contains(mi.id));
@@ -380,7 +420,21 @@ public:
         m_sparkCheck = new QCheckBox;
         m_sparkCheck->setChecked(breakoutIds.contains("spark"));
         grid->addWidget(m_sparkCheck, row, 2, Qt::AlignHCenter);
-        root->addLayout(grid);
+        // The acoustic list is long enough to outgrow a laptop screen;
+        // scroll the table rather than the whole dialog.
+        auto *table = new QWidget;
+        table->setLayout(grid);
+        auto *scroll = new QScrollArea;
+        scroll->setWidget(table);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setMinimumWidth(table->sizeHint().width() + 24);
+        scroll->setMinimumHeight(
+            std::min(table->sizeHint().height() + 4,
+                     QGuiApplication::primaryScreen()
+                             ->availableGeometry().height() / 2));
+        root->addWidget(scroll, 1);
 
         auto *form = new QFormLayout;
         m_shortCombo = new QComboBox;
@@ -1408,6 +1462,11 @@ private:
     }
 
     QString metricCaption(const QString &id) const {
+        QString base;
+        if (const char c = metricCurve(id, &base))
+            return base == "laf"   ? QString("L%1F (Fast)").arg(c)
+                   : base == "las" ? QString("L%1S (Slow)").arg(c)
+                                   : QString("L%1eq").arg(c);
         const QString w = m_weightCombo->currentText();
         if (id == "laf") return QString("L%1F (Fast)").arg(w);
         if (id == "las") return QString("L%1S (Slow)").arg(w);
@@ -1441,6 +1500,12 @@ private:
     }
 
     static double metricValue(const QString &id, const MetricValues &v) {
+        QString base;
+        if (const char c = metricCurve(id, &base))
+            return weightingValue(base == "laf"   ? v.fastW
+                                  : base == "las" ? v.slowW
+                                                  : v.leqW,
+                                  c);
         if (id == "laf") return v.laf;
         if (id == "las") return v.las;
         if (id == "leq") return v.leq;
@@ -2085,6 +2150,13 @@ private:
         mv.laf = res.fast + cal;
         mv.las = res.slow + cal;
         mv.leq = res.leq + cal;
+        auto withCal = [cal](const WeightingValues &v) {
+            return WeightingValues{v.a + cal, v.b + cal,
+                                   v.c + cal, v.z + cal};
+        };
+        mv.fastW = withCal(res.fastByWeight);
+        mv.slowW = withCal(res.slowByWeight);
+        mv.leqW = withCal(res.leqByWeight);
         mv.loud = m_loudVals;
         if (program && std::isfinite(m_loudVals.integrated))
             mv.toTarget = m_loudVals.integrated - m_targetLufs;
@@ -2175,10 +2247,6 @@ private:
         snap.fast = res.fast + cal;
         snap.slow = res.slow + cal;
         snap.leq = res.leq + cal;
-        auto withCal = [cal](const WeightingValues &v) {
-            return WeightingValues{v.a + cal, v.b + cal,
-                                   v.c + cal, v.z + cal};
-        };
         snap.fastByWeight = withCal(res.fastByWeight);
         snap.slowByWeight = withCal(res.slowByWeight);
         snap.leqByWeight = withCal(res.leqByWeight);

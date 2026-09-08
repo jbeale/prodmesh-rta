@@ -121,6 +121,9 @@ function caption(id, w, mode) {
     lra: "LRA (LU)", monoDelta: "MONO LOSS (LU)", corr: "CORRELATION",
     balance: "BALANCE (dB)", dbtpL: "TP L (dBTP)", dbtpR: "TP R (dBTP)",
   };
+  // Fixed-curve ids ("las_c") caption like the selector-driven ones.
+  const fixed = /^(laf|las|leq)_([abcz])$/.exec(id);
+  if (fixed) return caption(fixed[1], fixed[2].toUpperCase(), mode);
   return map[id] || id;
 }
 function unit(mode) { return mode === "program" ? " LUFS" : " dB"; }
