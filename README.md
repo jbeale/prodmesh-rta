@@ -44,9 +44,12 @@ The C++ version additionally has:
 - **Smaart-style SPL metrics** — rolling LAeq (two configurable windows),
   LZpk/LCpk, C-A ratio, L10/L50/L90, NIOSH/OSHA dose; pick which appear in
   the top bar and breakout under **Settings → Metrics…**
-- **Metric breakout** — a narrow always-on-top window of big readouts (with
+- **Metric breakout** — an always-on-top window of big readouts (with
   click-to-reset maxima and an SPL sparkline) to park next to your console
-  software (**View → Metric Breakout**, Ctrl/Cmd+B)
+  software, or stretch across a wall display: the numbers fit whatever size
+  you give the window, and the tiles can flow vertically or horizontally
+  (**View → Metric Breakout**, Ctrl/Cmd+B; sizing and layout under
+  **Settings → Metrics…**)
 - **Alarms** — traffic-light thresholds on a watched metric, plus **signal-loss
   detection** (digital black after 1 s, low-level silence after a configurable
   horizon) with a banner in the app and on the dashboard, a `signal` field on

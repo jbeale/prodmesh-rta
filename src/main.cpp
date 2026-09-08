@@ -361,7 +361,7 @@ public:
     MetricsDialog(QWidget *parent, int mode, const QStringList &mainIds,
                   const QStringList &breakoutIds, int shortS, int longS,
                   const QHash<QString, QPair<double, double>> &targets,
-                  int sizeIdx)
+                  int sizeIdx, int layoutIdx)
         : QDialog(parent) {
         setWindowTitle("Metrics");
         auto *root = new QVBoxLayout(this);
@@ -452,9 +452,13 @@ public:
             form->addRow("Long Leq window:", m_longCombo);
         }
         m_sizeCombo = new QComboBox;
-        m_sizeCombo->addItems({"Small", "Medium", "Large"});
-        m_sizeCombo->setCurrentIndex(std::clamp(sizeIdx, 0, 2));
+        m_sizeCombo->addItems({"Small", "Medium", "Large", "Fit to window"});
+        m_sizeCombo->setCurrentIndex(std::clamp(sizeIdx, 0, 3));
         form->addRow("Breakout number size:", m_sizeCombo);
+        m_layoutCombo = new QComboBox;
+        m_layoutCombo->addItems({"Vertical", "Horizontal"});
+        m_layoutCombo->setCurrentIndex(std::clamp(layoutIdx, 0, 1));
+        form->addRow("Breakout layout:", m_layoutCombo);
         root->addLayout(form);
 
         auto *hint = new QLabel(
@@ -502,6 +506,7 @@ public:
     int shortSecs() const { return m_shortCombo->currentData().toInt(); }
     int longSecs() const { return m_longCombo->currentData().toInt(); }
     int sizeIdx() const { return m_sizeCombo->currentIndex(); }
+    int layoutIdx() const { return m_layoutCombo->currentIndex(); }
 
     QHash<QString, QPair<double, double>> targets() const {
         QHash<QString, QPair<double, double>> out;
@@ -539,6 +544,7 @@ private:
     QComboBox *m_shortCombo;
     QComboBox *m_longCombo;
     QComboBox *m_sizeCombo;
+    QComboBox *m_layoutCombo;
 };
 
 // ---------------------------------------------------------------------------
@@ -1316,7 +1322,7 @@ private:
     void showMetricsSettings() {
         MetricsDialog dlg(this, m_mode, m_mainMetrics, m_breakoutMetrics,
                           m_leqShortS, m_leqLongS, m_targets,
-                          m_breakoutSizeIdx);
+                          m_breakoutSizeIdx, m_breakoutLayoutIdx);
         if (dlg.exec() != QDialog::Accepted)
             return;
         m_mainMetrics = dlg.mainIds();
@@ -1325,6 +1331,7 @@ private:
         m_leqLongS = dlg.longSecs();
         m_targets = dlg.targets();
         m_breakoutSizeIdx = dlg.sizeIdx();
+        m_breakoutLayoutIdx = dlg.layoutIdx();
         applyMetricsConfig();
         saveSettings();
     }
@@ -1334,7 +1341,13 @@ private:
         m_metricsEng.longWindowS = m_leqLongS;
         rebuildReadouts();
         static constexpr int kValuePt[] = {22, 32, 44};
-        m_breakout->setValueSize(kValuePt[std::clamp(m_breakoutSizeIdx, 0, 2)]);
+        const bool fit = m_breakoutSizeIdx >= 3;
+        m_breakout->setFitToWindow(fit);
+        if (!fit)
+            m_breakout->setValueSize(
+                kValuePt[std::clamp(m_breakoutSizeIdx, 0, 2)]);
+        m_breakout->setOrientation(m_breakoutLayoutIdx == 1 ? Qt::Horizontal
+                                                            : Qt::Vertical);
         m_breakout->setTiles(m_breakoutMetrics);
     }
 
@@ -1633,7 +1646,11 @@ private:
             m_breakout->restoreGeometry(bgeo);
         m_leqShortS = st.value("leqShortS", 60).toInt();
         m_leqLongS = st.value("leqLongS", 900).toInt();
-        m_breakoutSizeIdx = std::clamp(st.value("breakoutSize", 1).toInt(), 0, 2);
+        // Fresh installs fit the numbers to the window; a saved fixed size
+        // is kept as it was.
+        m_breakoutSizeIdx = std::clamp(st.value("breakoutSize", 3).toInt(), 0, 3);
+        m_breakoutLayoutIdx =
+            std::clamp(st.value("breakoutLayout", 0).toInt(), 0, 1);
         // Signal loss is judged on the raw input, so it is mode-independent.
         m_signalMon.enabled = st.value("signalEnabled", true).toBool();
         m_signalMon.thresholdDb = st.value("signalThreshold", -60.0).toDouble();
@@ -1783,6 +1800,7 @@ private:
         st.setValue("leqShortS", m_leqShortS);
         st.setValue("leqLongS", m_leqLongS);
         st.setValue("breakoutSize", m_breakoutSizeIdx);
+        st.setValue("breakoutLayout", m_breakoutLayoutIdx);
         st.setValue("signalEnabled", m_signalMon.enabled);
         st.setValue("signalThreshold", m_signalMon.thresholdDb);
         st.setValue("signalHoldS", m_signalMon.silenceHoldS);
@@ -2348,7 +2366,8 @@ private:
     double m_alarmWarn = 96.0;
     double m_alarmAlert = 102.0;
     QHash<QString, QPair<double, double>> m_targets;  // id -> {lo, hi} dB
-    int m_breakoutSizeIdx = 1;  // 0 small, 1 medium, 2 large
+    int m_breakoutSizeIdx = 3;    // 0 small, 1 medium, 2 large, 3 fit
+    int m_breakoutLayoutIdx = 0;  // 0 vertical, 1 horizontal
     QAction *m_logAct = nullptr;
     QFile m_logFile;
     qint64 m_lastLogMs = 0;

@@ -5,6 +5,8 @@
 #include <QCloseEvent>
 #include <QColor>
 #include <QFont>
+#include <QBoxLayout>
+#include <QEvent>
 #include <QFontMetrics>
 #include <QHash>
 #include <QImage>
@@ -1499,9 +1501,9 @@ public:
         setObjectName("metricTile");
         setStyleSheet("#metricTile { background:#20242e; "
                       "border:1px solid #2a2f3d; border-radius:6px; }");
-        auto *lay = new QVBoxLayout(this);
-        lay->setContentsMargins(14, 8, 14, 10);
-        lay->setSpacing(0);
+        m_lay = new QVBoxLayout(this);
+        m_lay->setContentsMargins(14, 8, 14, 10);
+        m_lay->setSpacing(0);
         m_cap = new QLabel;
         m_cap->setStyleSheet("color:#8a92a6; font-size:11px;");
         m_val = new QLabel("--.-");
@@ -1511,22 +1513,25 @@ public:
         f.setBold(true);
         m_val->setFont(f);
         m_val->setStyleSheet("color:#e8ecf4;");
+        m_val->installEventFilter(this);
         m_max = new ClickableLabel("MAX --.-");
         m_max->setStyleSheet("color:#e0c05c; font-size:12px;");
         m_max->setCursor(Qt::PointingHandCursor);
         m_max->setToolTip("Highest value since last reset — click to reset");
         m_max->onClick = [this] { resetMax(); };
-        lay->addWidget(m_cap);
-        lay->addWidget(m_val);
+        m_lay->addWidget(m_cap);
+        m_lay->addWidget(m_val);
         m_gauge = new TargetGauge;
-        lay->addWidget(m_gauge);
-        lay->addWidget(m_max);
+        m_lay->addWidget(m_gauge);
+        m_lay->addWidget(m_max);
     }
 
     void set(const QString &caption, double v, const QString &suffix) {
         m_cap->setText(caption);
         m_suffix = suffix;
         m_val->setText(fmt(v) + (std::isfinite(v) ? suffix : QString()));
+        if (m_fit && probeChars() != m_fitChars)
+            fitFont();
         m_gauge->setValue(v);
         if (std::isfinite(v) && (!std::isfinite(m_maxVal) || v > m_maxVal)) {
             m_maxVal = v;
@@ -1537,9 +1542,34 @@ public:
     void setTarget(double lo, double hi) { m_gauge->setBand(lo, hi); }
 
     void setValueSize(int pt) {
-        QFont f = m_val->font();
-        f.setPointSize(pt);
-        m_val->setFont(f);
+        m_pt = pt;
+        if (!m_fit)
+            applyPt(pt);
+    }
+
+    // Fit mode: the tile expands with the window and the number is sized to
+    // whatever the layout hands the value label — never the reverse. If the
+    // label kept a size hint, a bigger font would raise the window's minimum
+    // size, which would allow a bigger font, and the window could only ever
+    // grow.
+    void setFitToSize(bool on) {
+        if (on == m_fit)
+            return;
+        m_fit = on;
+        if (on) {
+            setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            m_val->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+            m_val->setMinimumSize(40, 24);
+            m_lay->setStretchFactor(m_val, 1);
+            fitFont();
+        } else {
+            setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+            m_val->setSizePolicy(QSizePolicy::Preferred,
+                                 QSizePolicy::Preferred);
+            m_val->setMinimumSize(0, 0);
+            m_lay->setStretchFactor(m_val, 0);
+            applyPt(m_pt);
+        }
     }
 
     void setAlarmState(int state) {
@@ -1554,19 +1584,68 @@ public:
         m_max->setText("MAX --.-");
     }
 
+protected:
+    bool eventFilter(QObject *o, QEvent *e) override {
+        if (o == m_val && e->type() == QEvent::Resize && m_fit)
+            fitFont();
+        return QWidget::eventFilter(o, e);
+    }
+
 private:
     static QString fmt(double v) {
         return std::isfinite(v) ? QString::number(v, 'f', 1)
                                 : QString("--.-");
     }
 
+    void applyPt(int pt) {
+        QFont f = m_val->font();
+        f.setPointSize(pt);
+        m_val->setFont(f);
+    }
+
+    // Size for a fixed digit count rather than the current text, so the
+    // number does not jump when 99.9 becomes 100.0. Six covers "-100.0";
+    // the monospace face keeps widths stable within that.
+    int probeChars() const { return std::max(6, int(m_val->text().size())); }
+
+    void fitFont() {
+        const QRect r = m_val->contentsRect();
+        if (r.width() <= 0 || r.height() <= 0)
+            return;
+        m_fitChars = probeChars();
+        const QString probe(m_fitChars, QChar('0'));
+        QFont f = m_val->font();
+        int lo = kMinPt, hi = kMaxPt;  // largest size that still fits
+        while (lo < hi) {
+            const int mid = (lo + hi + 1) / 2;
+            f.setPointSize(mid);
+            const QFontMetrics fm(f);
+            if (fm.horizontalAdvance(probe) <= r.width() &&
+                fm.height() <= r.height())
+                lo = mid;
+            else
+                hi = mid - 1;
+        }
+        if (lo != m_val->font().pointSize())
+            applyPt(lo);
+    }
+
+    // The floor keeps a cramped window legible; the ceiling only stops a
+    // lone tile on a wall display from becoming a novelty.
+    static constexpr int kMinPt = 22;
+    static constexpr int kMaxPt = 400;
+
     double m_maxVal = kNaN;
     QString m_suffix;
+    QVBoxLayout *m_lay;
     QLabel *m_cap;
     QLabel *m_val;
     TargetGauge *m_gauge;
     ClickableLabel *m_max;
     int m_alarm = 0;
+    int m_pt = 32;
+    bool m_fit = false;
+    int m_fitChars = 0;
 };
 
 // Compact 10-minute SPL history strip for the breakout window.
@@ -1678,10 +1757,10 @@ public:
         lay->setContentsMargins(8, 8, 8, 8);
         lay->setSpacing(6);
         m_tilesBox = new QWidget;
-        m_tilesLay = new QVBoxLayout(m_tilesBox);
+        m_tilesLay = new QBoxLayout(QBoxLayout::TopToBottom, m_tilesBox);
         m_tilesLay->setContentsMargins(0, 0, 0, 0);
         m_tilesLay->setSpacing(6);
-        lay->addWidget(m_tilesBox);
+        lay->addWidget(m_tilesBox, 1);
         m_onTop = new QCheckBox("Always on top");
         QObject::connect(m_onTop, &QCheckBox::toggled, this, [this](bool on) {
             const bool vis = isVisible();
@@ -1690,10 +1769,9 @@ public:
                 show();  // changing flags hides the window
         });
         lay->addWidget(m_onTop);
-        lay->addStretch(1);
     }
 
-    // Rebuild the tile stack. "spark" is the SPL history sparkline; any
+    // Rebuild the tile set. "spark" is the SPL history sparkline; any
     // other id becomes a MetricTile fed by update(). Maxima reset.
     void setTiles(const QStringList &ids) {
         for (MetricTile *t : m_tiles)
@@ -1701,25 +1779,52 @@ public:
         m_tiles.clear();
         delete m_spark;
         m_spark = nullptr;
+        m_ids = ids;
         for (const QString &id : ids) {
             if (id == "spark") {
                 m_spark = new SparkTile;
                 m_spark->setCaption(m_sparkCaption);
-                m_tilesLay->addWidget(m_spark);
             } else {
                 auto *t = new MetricTile;
                 t->setValueSize(m_valuePt);
+                t->setFitToSize(m_fit);
                 m_tiles.insert(id, t);
-                m_tilesLay->addWidget(t);
             }
         }
+        relayout();
     }
 
     void setValueSize(int pt) {
         m_valuePt = pt;
         for (MetricTile *t : m_tiles)
             t->setValueSize(pt);
-        adjustSize();  // let the window shrink when the numbers do
+        if (!m_fit)
+            adjustSize();  // let the window shrink when the numbers do
+    }
+
+    void setFitToWindow(bool on) {
+        if (on == m_fit)
+            return;
+        m_fit = on;
+        for (MetricTile *t : m_tiles)
+            t->setFitToSize(on);
+        relayout();
+    }
+
+    void setOrientation(Qt::Orientation o) {
+        const auto dir = o == Qt::Horizontal ? QBoxLayout::LeftToRight
+                                             : QBoxLayout::TopToBottom;
+        if (dir == m_tilesLay->direction())
+            return;
+        m_tilesLay->setDirection(dir);
+        // A stack of tiles turned into a row is still tall and narrow, so
+        // nothing shows until the window is dragged wide. Turn the window
+        // with the tiles instead — only while shown, so the saved geometry
+        // still rules at startup.
+        if (isVisible()) {
+            layout()->activate();  // new minimum size before the resize
+            resize(height(), width());
+        }
     }
 
     void updateMetrics(const std::vector<MetricDisplay> &vals) {
@@ -1763,8 +1868,28 @@ protected:
     }
 
 private:
+    // Re-add the tiles in their configured order. At fixed sizes a trailing
+    // stretch keeps them packed at the start; in fit mode they share the
+    // whole window instead.
+    void relayout() {
+        while (QLayoutItem *it = m_tilesLay->takeAt(0))
+            delete it;  // tiles stay owned by m_tilesBox
+        for (const QString &id : m_ids) {
+            if (id == "spark") {
+                if (m_spark)
+                    m_tilesLay->addWidget(m_spark);
+            } else if (MetricTile *t = m_tiles.value(id)) {
+                m_tilesLay->addWidget(t);
+            }
+        }
+        if (!m_fit)
+            m_tilesLay->addStretch(1);
+    }
+
     QWidget *m_tilesBox;
-    QVBoxLayout *m_tilesLay;
+    QBoxLayout *m_tilesLay;
+    QStringList m_ids;
+    bool m_fit = false;
     QHash<QString, MetricTile *> m_tiles;
     SparkTile *m_spark = nullptr;
     QString m_sparkCaption = "SPL — 10 MIN";
