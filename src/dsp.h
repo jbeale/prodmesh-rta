@@ -92,6 +92,22 @@ inline double toDb(double power) {
     return 10.0 * std::log10(std::max(power, 1e-20));
 }
 
+// One value for each IEC SPL frequency weighting.  Kept together so the
+// analyzer can update every curve from the same FFT block, irrespective of
+// the curve currently selected for the local display.
+struct WeightingValues {
+    double a = kNaN, b = kNaN, c = kNaN, z = kNaN;
+};
+
+inline double weightingValue(const WeightingValues &v, char weighting) {
+    switch (weighting) {
+    case 'A': return v.a;
+    case 'B': return v.b;
+    case 'C': return v.c;
+    default:  return v.z;
+    }
+}
+
 // Streaming time-domain C-weighting: two 1st-order highpasses at 20.6 Hz and
 // two 1st-order lowpasses at 12.2 kHz (bilinear transform, prewarped), unity
 // gain at 1 kHz. Used for LCpk metering — approximate near Nyquist, not an
@@ -297,6 +313,9 @@ struct AnalyzerResult {
     double fast = kNaN;
     double slow = kNaN;
     double leq = kNaN;
+    // Fast, Slow, and session Leq under every curve. `fast`/`slow`/`leq`
+    // above remain the local-display selection for backwards compatibility.
+    WeightingValues fastByWeight, slowByWeight, leqByWeight;
     // Broadband mean-square power (linear, dBFS domain) under each standard
     // weighting, independent of the display weighting — for derived metrics.
     double powA = 0.0, powB = 0.0, powC = 0.0, powZ = 0.0;
@@ -333,8 +352,18 @@ public:
         resetPeaks();
     }
 
+    // Changing the local curve must not discard the independently accumulated
+    // API values. Only the displayed RTA's smoothing/peak state is curve
+    // dependent.
+    void resetDisplay() {
+        m_bandP.assign(NUM_BANDS, kNaN);
+        m_hiresP.assign(HIRES_POINTS, kNaN);
+        m_hasBandP = false;
+        resetPeaks();
+    }
+
     void resetLeq() {
-        m_leqSum = 0.0;
+        m_leqSum = {0.0, 0.0, 0.0, 0.0};
         m_leqN = 0;
     }
 
@@ -383,15 +412,27 @@ public:
             PC += m_powerZ[k] * m_wC[k];
             PZ += m_powerZ[k];
         }
-        const double P = weighting == 'A' ? PA
-                         : weighting == 'B' ? PB
-                         : weighting == 'C' ? PC : PZ;
+        const WeightingValues P{PA, PB, PC, PZ};
         const double aFast = std::exp(-dt / 0.125);
         const double aSlow = std::exp(-dt / 1.0);
-        m_fastP = m_hasFast ? aFast * m_fastP + (1 - aFast) * P : P;
-        m_slowP = m_hasSlow ? aSlow * m_slowP + (1 - aSlow) * P : P;
+        auto smooth = [](WeightingValues &prev, const WeightingValues &now,
+                         double a, bool has) {
+            if (!has) {
+                prev = now;
+                return;
+            }
+            prev.a = a * prev.a + (1 - a) * now.a;
+            prev.b = a * prev.b + (1 - a) * now.b;
+            prev.c = a * prev.c + (1 - a) * now.c;
+            prev.z = a * prev.z + (1 - a) * now.z;
+        };
+        smooth(m_fastP, P, aFast, m_hasFast);
+        smooth(m_slowP, P, aSlow, m_hasSlow);
         m_hasFast = m_hasSlow = true;
-        m_leqSum += P;
+        m_leqSum.a += PA;
+        m_leqSum.b += PB;
+        m_leqSum.c += PC;
+        m_leqSum.z += PZ;
         m_leqN += 1;
 
         // 1/3-octave bands and the hi-res line-view spectrum, with the same
@@ -433,9 +474,17 @@ public:
         m_hasBandP = true;
 
         AnalyzerResult res;
-        res.fast = toDb(m_fastP);
-        res.slow = toDb(m_slowP);
-        res.leq = toDb(m_leqSum / std::max<qint64>(m_leqN, 1));
+        auto db = [](const WeightingValues &p) {
+            return WeightingValues{toDb(p.a), toDb(p.b), toDb(p.c), toDb(p.z)};
+        };
+        res.fastByWeight = db(m_fastP);
+        res.slowByWeight = db(m_slowP);
+        const double n = std::max<qint64>(m_leqN, 1);
+        res.leqByWeight = db({m_leqSum.a / n, m_leqSum.b / n,
+                              m_leqSum.c / n, m_leqSum.z / n});
+        res.fast = weightingValue(res.fastByWeight, weighting);
+        res.slow = weightingValue(res.slowByWeight, weighting);
+        res.leq = weightingValue(res.leqByWeight, weighting);
         res.powA = PA;
         res.powB = PB;
         res.powC = PC;
@@ -473,10 +522,9 @@ private:
     };
 
     void prepare() {
-        if (m_cachedSr == sr && m_cachedWeighting == weighting)
+        if (m_cachedSr == sr)
             return;
         m_cachedSr = sr;
-        m_cachedWeighting = weighting;
         const int nBins = FFT_SIZE / 2 + 1;
         const double df = double(sr) / FFT_SIZE;
         m_fftBuf.resize(FFT_SIZE);
@@ -565,11 +613,8 @@ private:
     std::vector<Band> m_hires;
     int m_splLo = 0, m_splHi = 0;
     int m_cachedSr = -1;
-    char m_cachedWeighting = 0;
-
-    double m_fastP = 0.0, m_slowP = 0.0;
+    WeightingValues m_fastP, m_slowP, m_leqSum;
     bool m_hasFast = false, m_hasSlow = false;
-    double m_leqSum = 0.0;
     qint64 m_leqN = 0;
     std::vector<double> m_bandP;
     std::vector<double> m_hiresP;

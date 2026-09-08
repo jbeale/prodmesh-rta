@@ -52,6 +52,9 @@ public:
         QString weighting = "A";
         double cal = 100.0;
         double fast = kNaN, slow = kNaN, leq = kNaN;  // dB SPL (cal applied)
+        // All simultaneous curves. The scalar fields above remain the local
+        // display selection for legacy clients.
+        WeightingValues fastByWeight, slowByWeight, leqByWeight;
         std::vector<double> bands;                    // dB SPL
         std::vector<double> peaks;                    // empty if peak hold off
         QString micCorr;                              // cal file name, or empty
@@ -90,6 +93,7 @@ public:
         qint64 t = 0;
         double fast = kNaN, slow = kNaN, leq = kNaN;  // dB SPL
         double ca = kNaN;  // C-A ratio (LF-energy trend over time)
+        WeightingValues fastByWeight, slowByWeight, leqByWeight;
     };
 
     explicit ApiServer(QObject *parent = nullptr) : QObject(parent) {
@@ -178,6 +182,21 @@ private:
             a.append(jnum(x));
         return a;
     }
+    static QJsonObject weightingsJson(const WeightingValues &v) {
+        return QJsonObject{{"a", jnum(v.a)}, {"b", jnum(v.b)},
+                           {"c", jnum(v.c)}, {"z", jnum(v.z)}};
+    }
+    QJsonObject splJson() const {
+        return QJsonObject{{"fast_db", weightingsJson(m_snap.fastByWeight)},
+                           {"slow_db", weightingsJson(m_snap.slowByWeight)},
+                           {"leq_db", weightingsJson(m_snap.leqByWeight)}};
+    }
+    // `spl` is dB SPL under every curve, so it belongs to acoustic mode only;
+    // program mode's levels are LUFS and carry no per-curve variant.
+    void addSpl(QJsonObject &o) const {
+        if (m_snap.mode != "program")
+            o.insert("spl", splJson());
+    }
 
     QJsonObject levelsJson() const {
         QJsonArray centers;
@@ -195,6 +214,7 @@ private:
             {"centers_hz", centers},
             {"bands_db", jarr(m_snap.bands)},
         };
+        addSpl(o);
         o.insert("peaks_db",
                  m_snap.peaks.empty() ? QJsonValue() : jarr(m_snap.peaks));
         o.insert("metrics", metricsJson());
@@ -416,10 +436,21 @@ private:
                  QJsonArray{"/api/status", "/api/spl", "/api/rta",
                             "/api/history?since_ms=&limit=",
                             "ws: /api/stream"}},
+                // Schema of the simultaneous-weighting `spl` object, so a
+                // client can discover the curves without parsing a sample.
+                {"spl_weightings", QJsonArray{"A", "B", "C", "Z"}},
+                {"spl_schema",
+                 QJsonObject{
+                     {"field", "spl"},
+                     {"mode", "acoustic"},
+                     {"time_weightings",
+                      QJsonArray{"fast_db", "slow_db", "leq_db"}},
+                     {"curves", QJsonArray{"a", "b", "c", "z"}},
+                 }},
             });
         }
         if (path == "/api/status") {
-            return QJsonDocument(QJsonObject{
+            QJsonObject o{
                 {"app", "prodmesh-remote-rta"},
                 {"mode", m_snap.mode},
                 {"samplerate", m_snap.samplerate},
@@ -439,7 +470,9 @@ private:
                                        ? QJsonValue()
                                        : QJsonValue(m_snap.micCorr)},
                 {"signal", signalJson()},
-            });
+            };
+            addSpl(o);
+            return QJsonDocument(o);
         }
         if (path == "/api/spl") {
             QJsonObject o{
@@ -455,6 +488,7 @@ private:
                 {"signal", signalJson()},
                 {"targets", targetsJson()},
             };
+            addSpl(o);
             if (m_snap.mode == "program")
                 o.insert("loudness", loudnessJson());
             return QJsonDocument(o);
@@ -485,13 +519,20 @@ private:
             for (auto it = m_hist.begin(); it != m_hist.end(); ++it, --remaining) {
                 if (it->t <= since || remaining > limit)
                     continue;
-                samples.append(QJsonObject{
+                QJsonObject s{
                     {"t", it->t},
                     {"fast_db", jnum(it->fast)},
                     {"slow_db", jnum(it->slow)},
                     {"leq_db", jnum(it->leq)},
                     {"ca_db", jnum(it->ca)},
-                });
+                };
+                if (m_snap.mode != "program")
+                    s.insert("spl", QJsonObject{
+                        {"fast_db", weightingsJson(it->fastByWeight)},
+                        {"slow_db", weightingsJson(it->slowByWeight)},
+                        {"leq_db", weightingsJson(it->leqByWeight)},
+                    });
+                samples.append(s);
             }
             // The three series follow the mode: Fast / Slow / Leq in dB SPL
             // for acoustic, Momentary / Short-term / Integrated in LUFS for

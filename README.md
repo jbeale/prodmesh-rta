@@ -330,9 +330,9 @@ networks never see HTTP traffic. All endpoints are read-only GETs returning JSON
 | Endpoint | Returns |
 |---|---|
 | `/` | live browser dashboard (readouts, metric grid, RTA bars) |
-| `/api` | JSON index of the endpoints below |
-| `/api/status` | sample rate, weighting, cal, uptime, history length |
-| `/api/spl` | current `fast_db`, `slow_db`, `leq_db` + `metrics` + `alarm` |
+| `/api` | JSON index of the endpoints below, plus the `spl` schema |
+| `/api/status` | sample rate, weighting, cal, uptime, history length, current `spl` |
+| `/api/spl` | current `fast_db`, `slow_db`, `leq_db` + all-curve `spl` + `metrics` + `alarm` |
 | `/api/rta` | `centers_hz` + `bands_db` (31 values) + `peaks_db` + `metrics` |
 | `/api/history?since_ms=&limit=` | 1 Hz level samples, up to 6 hours |
 | `/api/overs` | timestamped true-peak overshoots this session |
@@ -340,6 +340,27 @@ networks never see HTTP traffic. All endpoints are read-only GETs returning JSON
 
 `metrics` maps metric ids to values; `alarm` reports the watched metric,
 thresholds, and traffic-light `state` (0 ok / 1 warning / 2 alert).
+
+In acoustic mode, `/api/status`, `/api/spl`, `/api/rta`, and every WebSocket
+level message also carry an **`spl`** object with every frequency weighting
+computed simultaneously from the same block. A remote dashboard can therefore
+show dBA on one widget and dBC on another, and changing the weighting selector
+in the app never changes or interrupts what other machines receive:
+
+```json
+"spl": {
+  "fast_db": { "a": 91.8, "b": 94.2, "c": 96.7, "z": 97.4 },
+  "slow_db": { "a": 91.6, "b": 94.0, "c": 96.5, "z": 97.2 },
+  "leq_db":  { "a": 91.4, "b": 93.8, "c": 96.3, "z": 97.0 }
+}
+```
+
+The top-level `fast_db`, `slow_db`, and `leq_db` fields remain the locally
+selected weighting, and `weighting` says which. `/api/history` stores the same
+`spl` object in every one-second sample. Program mode omits `spl` (its levels
+are LUFS, which have no per-curve variant); `/api` lists the curves and field
+names under `spl_weightings` / `spl_schema` for clients that want to discover
+them.
 
 Every payload carries a **`mode`** field — `"acoustic"` or `"program"` —
 and *which metric ids are present depends on it*, so switch on `mode` before
@@ -390,7 +411,7 @@ the stream rate chosen in Settings (1/5/10/20 Hz, default 10):
 const ws = new WebSocket("ws://192.168.1.18:8517/api/stream");
 ws.onmessage = (ev) => {
   const m = JSON.parse(ev.data);
-  console.log(m.fast_db, m.slow_db, m.bands_db);
+  console.log(m.fast_db, m.spl.fast_db.c, m.bands_db);  // selected, then dBC
 };
 ```
 
@@ -408,7 +429,7 @@ setInterval(async () => {
   if (samples.length) {
     since = samples.at(-1).t;
     for (const s of samples) {
-      // s = { t: epoch ms, fast_db, slow_db, leq_db }
+      // s = { t: epoch ms, fast_db, slow_db, leq_db, spl: {…} }
       store(s);
     }
   }
