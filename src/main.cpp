@@ -708,7 +708,7 @@ public:
         ctl->addSpacing(12);
         ctl->addWidget(new QLabel("Weighting:"));
         m_weightCombo = new QComboBox;
-        m_weightCombo->addItems({"A", "C", "Z"});
+        m_weightCombo->addItems({"A", "B", "C", "Z"});
         ctl->addWidget(m_weightCombo);
         ctl->addSpacing(12);
         m_calLbl = new QLabel("Cal:");
@@ -1347,6 +1347,11 @@ private:
         QStringList head{"time"};
         head << m_logIds;
         head << "alarm";
+        // Weighting is recorded per row because it may be changed while a
+        // log is active; otherwise the numeric SPL columns are ambiguous.
+        // Appended last so files written by earlier versions and the
+        // parsers built for them keep the same column offsets.
+        head << "weighting";
         m_logFile.write(head.join(',').toUtf8() + "\n");
         m_lastLogMs = 0;
         m_logAct->setText(QString("Stop SPL &Log (%1)")
@@ -1378,6 +1383,7 @@ private:
             row << (std::isfinite(v) ? QString::number(v, 'f', 2) : QString());
         }
         row << QString::number(alarmState);
+        row << m_weightCombo->currentText();
         m_logFile.write(row.join(',').toUtf8() + "\n");
         if (now - m_lastLogFlush >= 10000) {  // survive crashes/power loss
             m_lastLogFlush = now;
@@ -1502,7 +1508,7 @@ private:
                 "<h3>%1</h3>"
                 "<p>Version %2</p>"
                 "<p>A free SPL meter and 1/3-octave real-time analyzer:<br>"
-                "Fast / Slow / Leq with A/C/Z weighting, spectrogram, SPL "
+                "Fast / Slow / Leq with A/B/C/Z weighting, spectrogram, SPL "
                 "history, and an HTTP + WebSocket API for remote monitoring "
                 "by the ProdMesh production toolkit.</p>"
                 "<p>Levels are relative until calibrated — set the Cal offset "
@@ -2668,12 +2674,23 @@ static int selftest() {
     ok = ok && std::fabs(hiresFreq(hMax) - 1000.0) < 25.0 &&
          std::fabs(res.hires[hMax] + 3.01) < 1.0;
 
-    // Parallel weighted powers: A-weight at 1 kHz is 0 dB, so powA ~ -3.01.
-    std::printf("powA = %7.2f, powC = %7.2f, powZ = %7.2f dBFS "
+    // The IEC curves are normalised at 1 kHz, so every weighting reads the
+    // full-scale sine at about -3.01 dBFS there.
+    std::printf("powA = %7.2f, powB = %7.2f, powC = %7.2f, powZ = %7.2f dBFS "
                 "(expected ~ -3.01 each)\n",
-                toDb(res.powA), toDb(res.powC), toDb(res.powZ));
+                toDb(res.powA), toDb(res.powB), toDb(res.powC), toDb(res.powZ));
     ok = ok && std::fabs(toDb(res.powA) + 3.01) < 0.3 &&
+         std::fabs(toDb(res.powB) + 3.01) < 0.3 &&
          std::fabs(toDb(res.powZ) + 3.01) < 0.3;
+
+    // IEC 60651 B-weighting reference values, rounded to 0.1 dB in the
+    // published table.  These catch both the 158.5 Hz pole and normalisation.
+    std::printf("B-weight: 100 Hz = %.2f dB (ref -5.6), 1 kHz = %.2f dB "
+                "(ref 0.0), 10 kHz = %.2f dB (ref -4.3)\n",
+                bWeightDb(100.0), bWeightDb(1000.0), bWeightDb(10000.0));
+    ok = ok && std::fabs(bWeightDb(100.0) + 5.6) < 0.1 &&
+         std::fabs(bWeightDb(1000.0)) < 0.1 &&
+         std::fabs(bWeightDb(10000.0) + 4.3) < 0.1;
 
     // Time-domain C-weighting filter: unity gain at 1 kHz.
     CWeightFilter cw;

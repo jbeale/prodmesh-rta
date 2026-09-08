@@ -29,7 +29,7 @@ One top-level mode, because the differences are coupled, not independent:
 | | Acoustic | Program |
 |---|---|---|
 | Reference | 20 µPa via cal offset | digital full scale (no cal) |
-| Weighting | A / C / Z selectable | K (mandated) for loudness; A/C/Z still drives the RTA *display* |
+| Weighting | A / B / C / Z selectable | K (mandated) for loudness; A/B/C/Z still drives the RTA *display* |
 | Metrics | Leq, L10/L50/L90, C-A, dose | M / S / Integrated LUFS, dBTP, PLR, (LRA) |
 | Channels | pick one, or mix | stereo pair |
 | Axis labels | dB SPL | dBFS |

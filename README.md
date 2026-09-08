@@ -11,7 +11,7 @@ analyzer, part of the ProdMesh production toolkit: point it at any microphone
 input and get
 
 - **SPL meter** — Fast (125 ms), Slow (1 s), and Leq (average since reset),
-  with **A / C / Z** frequency weighting
+  with **A / B / C / Z** frequency weighting
 - **RTA** — 31-band 1/3-octave real-time spectrum, 20 Hz – 20 kHz, with
   selectable averaging and peak hold
 - Input device picker, clip indicator, calibration offset
@@ -187,9 +187,11 @@ output only appears when redirected:
   default). **Mix** averages all channels; note that unused channels then
   dilute the level (a mic alone on one of 8 inputs reads ~9 dB low per
   doubling). Reported as `input_channel` in `/api/status`.
-- **Weighting** — A (default, matches most SPL specs), C, or Z (flat).
-  Applies to both the SPL readouts and the RTA display; the readout labels
-  follow (LAF/LCF/LZF, etc.).
+- **Weighting** — A (default, matches most SPL specs), B (IEC 60651, for
+  legacy specs and reference data), C, or Z (flat). Applies to both the SPL
+  readouts and the RTA display; the readout labels follow (LAF/LBF/LCF/LZF,
+  etc.). Each CSV log row ends with the active weighting, and the API reports
+  it as `weighting`, so recorded readings stay unambiguous.
 - **RTA avg** — smoothing for the spectrum bars. **Peak hold** overlays a
   slowly decaying max line per band.
 - **Reset Leq/Peaks** — restarts the Leq average and clears peak hold.
@@ -447,7 +449,7 @@ build without revisiting LGPL compliance.
   correspondingly coarser.
 - A DSP sanity check is built in: `--selftest` (both versions) verifies a
   full-scale 1 kHz sine reads −3.01 dBFS in the 1 kHz band. The C++ version
-  additionally checks the hi-res spectrum peak, the A/C/Z broadband powers,
+  additionally checks the hi-res spectrum peak, the A/B/C/Z broadband powers,
   the time-domain C-weighting filter's 1 kHz gain, mic-correction math, and
   the metrics engine (rolling Leq windows, C-A ratio, L10/L50/L90
   percentiles, and NIOSH/OSHA dose against closed-form expected values).
